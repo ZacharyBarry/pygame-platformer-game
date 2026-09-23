@@ -40,6 +40,12 @@ class Player(pygame.sprite.Sprite):
         self.rect = self.image.get_rect(bottomleft=(x, y + TILE_SIZE))
         if self.rect.height > TILE_SIZE: self.rect.bottom = y + TILE_SIZE
 
+        # Hitbox: ~5-10% narrower horizontally (shaving 2px, 1px on each side)
+        # to make squeezing through single-block (16px) gaps significantly smoother
+        self.hitbox_width = max(8, self.rect.width - 2)
+        self.hitbox = pygame.Rect(0, 0, self.hitbox_width, self.rect.height)
+        self.hitbox.midbottom = self.rect.midbottom
+
         self.pos = pygame.math.Vector2(self.rect.centerx, self.rect.bottom)
         self.vel = pygame.math.Vector2(0, 0)
         self.acc = pygame.math.Vector2(0, 0)
@@ -224,23 +230,21 @@ class Player(pygame.sprite.Sprite):
 
             # --- Move & Collide X ---
             self.pos.x += self.vel.x
-            self.rect.centerx = round(self.pos.x)
-            # Update hitbox position relative to the new drawing rect position
-            # self.hitbox.centerx = self.rect.centerx # Removed if not using persistent hitbox
-            self.check_collisions('x')  # Checks collision using temp hitbox, corrects self.rect
-            # Update physics position based on final drawing rect AFTER potential collision adjustment
-            self.pos.x = self.rect.centerx
+            self.hitbox.centerx = round(self.pos.x)
+            self.rect.centerx = self.hitbox.centerx
+            self.check_collisions('x')
+            self.pos.x = self.hitbox.centerx
+            self.rect.centerx = self.hitbox.centerx
 
             # --- Move & Collide Y ---
             self.pos.y += self.vel.y + 0.5 * self.acc.y
-            self.rect.bottom = round(self.pos.y)
-            # Update hitbox position relative to the new drawing rect position
-            # self.hitbox.midbottom = self.rect.midbottom # Removed if not using persistent hitbox
+            self.hitbox.bottom = round(self.pos.y)
+            self.rect.bottom = self.hitbox.bottom
             self.on_ground = False;
             self.on_ice = False  # Reset before check
-            self.check_collisions('y')  # Checks collision using temp hitbox, corrects self.rect, sets flags
-            # Update physics position based on final drawing rect AFTER potential collision adjustment
-            self.pos.y = self.rect.bottom
+            self.check_collisions('y')
+            self.pos.y = self.hitbox.bottom
+            self.rect.bottom = self.hitbox.bottom
 
             # --- Update State (if not dodging/hit/dying) ---
             if self.state not in ['dodging', 'hit', 'dying']:
@@ -251,61 +255,55 @@ class Player(pygame.sprite.Sprite):
                 else:
                     self.set_state('idle')
 
-        # --- Screen Boundaries (Applied to drawing rect) ---
-        if self.rect.left < 0: self.rect.left = 0; self.pos.x = self.rect.centerx; self.vel.x = 0
-        if self.rect.right > SCREEN_WIDTH: self.rect.right = SCREEN_WIDTH; self.pos.x = self.rect.centerx; self.vel.x = 0
-
-        # --- Final Hitbox Position Update (Removed if not using persistent hitbox) ---
-        # self.hitbox.midbottom = self.rect.midbottom
+        # --- Screen Boundaries (Applied to hitbox and drawing rect) ---
+        if self.hitbox.left < 0:
+            self.hitbox.left = 0; self.pos.x = self.hitbox.centerx; self.rect.centerx = self.hitbox.centerx; self.vel.x = 0
+        if self.hitbox.right > SCREEN_WIDTH:
+            self.hitbox.right = SCREEN_WIDTH; self.pos.x = self.hitbox.centerx; self.rect.centerx = self.hitbox.centerx; self.vel.x = 0
 
         # --- Animation ---
         self._animate()  # Handles image and visibility
 
     def check_collisions(self, direction):
-        """Checks and resolves collisions with platforms, hazards, goals."""
+        """Checks and resolves collisions with platforms, hazards, goals using skinnier hitbox."""
         if direction == 'x':
-            hits = pygame.sprite.spritecollide(self, self.game.platforms, False)
+            hits = [p for p in self.game.platforms if self.hitbox.colliderect(p.rect)]
             for platform in hits:
-                if self.vel.x > 0: self.rect.right = platform.rect.left
-                elif self.vel.x < 0: self.rect.left = platform.rect.right
-                self.pos.x = self.rect.centerx
+                if self.vel.x > 0: self.hitbox.right = platform.rect.left
+                elif self.vel.x < 0: self.hitbox.left = platform.rect.right
+                self.pos.x = self.hitbox.centerx
+                self.rect.centerx = self.hitbox.centerx
                 self.vel.x = 0 # Stop horizontal movement on wall collision
 
         elif direction == 'y':
-            hits = pygame.sprite.spritecollide(self, self.game.platforms, False)
+            hits = [p for p in self.game.platforms if self.hitbox.colliderect(p.rect)]
             for platform in hits:
                 if self.vel.y > 0: # Moving down (landing)
-                    # Check if player bottom just crossed the platform top edge
-                     if self.pos.y - self.vel.y <= platform.rect.top + 1.5: # Increased tolerance slightly
-                        if self.rect.bottom >= platform.rect.top : # Ensure overlap before snapping
-                            self.rect.bottom = platform.rect.top
-                            self.pos.y = self.rect.bottom # Sync position vector
+                    if self.pos.y - self.vel.y <= platform.rect.top + 1.5:
+                        if self.hitbox.bottom >= platform.rect.top:
+                            self.hitbox.bottom = platform.rect.top
+                            self.pos.y = self.hitbox.bottom
+                            self.rect.bottom = self.hitbox.bottom
                             self.vel.y = 0
                             self.on_ground = True
-                            # Check if the platform landed on is ice
                             if hasattr(platform, 'tile_type') and platform.tile_type == 'I':
                                 self.on_ice = True
-                            # Break if landing on solid ground? Depends if multiple overlaps are possible/problematic.
-                            # For simplicity, let the first detected ground determine ice status.
-                            # break
 
                 elif self.vel.y < 0: # Moving up (hitting ceiling)
-                     # Check if player top just crossed the platform bottom edge
-                     player_top_prev = (self.pos.y - self.rect.height) - self.vel.y
-                     if player_top_prev >= platform.rect.bottom - 1: # -1 tolerance
-                         if self.rect.top <= platform.rect.bottom: # Ensure overlap
-                            self.rect.top = platform.rect.bottom
-                            self.pos.y = self.rect.bottom # Sync position vector
-                            self.vel.y = 0 # Stop upward movement
-                            # break # Stop checking ceilings once one is hit
+                    player_top_prev = (self.pos.y - self.hitbox.height) - self.vel.y
+                    if player_top_prev >= platform.rect.bottom - 1:
+                        if self.hitbox.top <= platform.rect.bottom:
+                            self.hitbox.top = platform.rect.bottom
+                            self.pos.y = self.hitbox.bottom
+                            self.rect.bottom = self.hitbox.bottom
+                            self.vel.y = 0
 
             # Hazard/Goal collisions (check AFTER platform resolution)
             if self.state not in ['dodging', 'hit', 'dying']:
-                # Use spritecollideany for efficiency if just checking for any hit
-                if pygame.sprite.spritecollideany(self, self.game.hazards):
+                if any(self.hitbox.colliderect(h.rect) for h in self.game.hazards):
                     self.take_hit()
-                elif pygame.sprite.spritecollideany(self, self.game.goals):
-                     self.game.level_complete() # Check goal only if no hazard hit in same frame
+                elif any(self.hitbox.colliderect(g.rect) for g in self.game.goals):
+                    self.game.level_complete()
 
 
     def _animate(self):
@@ -346,8 +344,10 @@ class Player(pygame.sprite.Sprite):
                  self.image = self.idle_frames_left[0] if facing_left else self.idle_frames_right[0]
             # Ensure rect is updated if jump image changed
             if self.image: # Check if image exists before getting rect
-                old_bottom = self.rect.bottom; old_centerx = self.rect.centerx
+                old_bottom = self.hitbox.bottom; old_centerx = self.hitbox.centerx
                 self.rect = self.image.get_rect(centerx=old_centerx, bottom=old_bottom)
+                self.hitbox.height = self.rect.height
+                self.hitbox.midbottom = self.rect.midbottom
             return
 
         num_frames = len(frames)
@@ -365,8 +365,10 @@ class Player(pygame.sprite.Sprite):
         new_image = frames[self.current_frame_idx]
         if self.image != new_image:
             self.image = new_image
-            old_bottom = self.rect.bottom; old_centerx = self.rect.centerx
+            old_bottom = self.hitbox.bottom; old_centerx = self.hitbox.centerx
             self.rect = self.image.get_rect(centerx=old_centerx, bottom=old_bottom)
+            self.hitbox.height = self.rect.height
+            self.hitbox.midbottom = self.rect.midbottom
 
 
 # --- Other Sprite Classes ---

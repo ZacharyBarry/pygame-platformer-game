@@ -76,6 +76,23 @@ class Game:
         self._load_assets()
         print(f"--- Game Mode Set To: {self.game_mode.upper()} ---")
 
+    @property
+    def edits_used(self):
+        """Calculates total blocks changed compared to the original level layout."""
+        if not self.active_level_grid or not (0 <= self.current_level_index < len(levels.LEVELS)):
+            return 0
+        orig = levels.LEVELS[self.current_level_index]
+        diff_count = 0
+        for r in range(min(len(self.active_level_grid), len(orig))):
+            for c in range(min(len(self.active_level_grid[r]), len(orig[r]))):
+                if self.active_level_grid[r][c] != orig[r][c]:
+                    diff_count += 1
+        return diff_count
+
+    @edits_used.setter
+    def edits_used(self, val):
+        pass
+
     def _load_assets(self):
         print("Loading assets...")
         any_fail = False
@@ -98,6 +115,7 @@ class Game:
         except Exception as e: print(f"    - ERROR creating hazard: {e}"); any_fail = True; #... fallback ...
         print("  Loading sounds..."); # ... sound loading ...
         self.sound_jump = load_sound(SND_JUMP); self.sound_hit = load_sound(SND_HIT); self.sound_win_level = load_sound(SND_WIN_LEVEL); self.sound_win_game = load_sound(SND_WIN_GAME); self.sound_game_over = load_sound(SND_GAME_OVER)
+        if self.sound_jump: self.sound_jump.set_volume(0.2)
         print("  Loading music..."); # ... music loading ...
         if load_music(MUS_BACKGROUND): pygame.mixer.music.set_volume(0.3);
         else: print(f"    ! Warning: Music load failed.")
@@ -171,7 +189,6 @@ class Game:
                     if event.key == pygame.K_ESCAPE: self.playing = False; self.running = False
                     elif event.key == pygame.K_e:
                         self.editing = False
-                        self.edits_used += len(self.current_edit_session)
                         self.current_edit_session = []
                     elif event.key == pygame.K_r:
                         print(f"--- Hard Reset Level {self.current_level_index + 1} ---")
@@ -202,7 +219,11 @@ class Game:
                     r = int((mouse_y - self.level_offset_y) // TILE_SIZE)
                     if 0 <= r < len(self.active_level_grid) and 0 <= c < len(self.active_level_grid[0]):
                         if event.button == 1: # Left
-                            if self.active_level_grid[r][c] == '.':
+                            block_rect = pygame.Rect(self.level_offset_x + c * TILE_SIZE, self.level_offset_y + r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+                            # Do not allow placing a platform block on top of the player's active body
+                            if self.player and block_rect.colliderect(self.player.rect.inflate(-2, -2)):
+                                pass
+                            elif self.active_level_grid[r][c] == '.':
                                 self.active_level_grid[r][c] = self.selected_block_type
                                 self.current_edit_session.append(('add', (r, c), self.selected_block_type))
                                 img = self.platform_images.get(self.selected_block_type)
@@ -302,6 +323,34 @@ class Game:
                 for c in range(len(self.active_level_grid[0])):
                     rect = pygame.Rect(self.level_offset_x + c * TILE_SIZE, self.level_offset_y + r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
                     pygame.draw.rect(self.screen, COLOR_GRID, rect, 1)
+
+            # Highlight modified / edited cells
+            if 0 <= self.current_level_index < len(levels.LEVELS):
+                orig = levels.LEVELS[self.current_level_index]
+                pulse = (pygame.time.get_ticks() // 250) % 2
+                for r in range(min(len(self.active_level_grid), len(orig))):
+                    for c in range(min(len(self.active_level_grid[r]), len(orig[r]))):
+                        if self.active_level_grid[r][c] != orig[r][c]:
+                            rx = self.level_offset_x + c * TILE_SIZE
+                            ry = self.level_offset_y + r * TILE_SIZE
+                            rect = pygame.Rect(rx, ry, TILE_SIZE, TILE_SIZE)
+                            edit_surf = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+                            if self.active_level_grid[r][c] != '.':
+                                # Added or modified block: highlight in bright gold/yellow glow
+                                fill_color = (255, 220, 0, 80 if pulse else 120)
+                                border_color = (255, 240, 90) if pulse else (255, 190, 0)
+                                edit_surf.fill(fill_color)
+                                self.screen.blit(edit_surf, (rx, ry))
+                                pygame.draw.rect(self.screen, border_color, rect, 2)
+                            else:
+                                # Removed block: highlight empty slot in soft red with an indicator
+                                fill_color = (255, 60, 60, 70 if pulse else 110)
+                                border_color = (255, 100, 100) if pulse else (200, 50, 50)
+                                edit_surf.fill(fill_color)
+                                self.screen.blit(edit_surf, (rx, ry))
+                                pygame.draw.rect(self.screen, border_color, rect, 2)
+                                pygame.draw.line(self.screen, border_color, (rx + 3, ry + 3), (rx + TILE_SIZE - 4, ry + TILE_SIZE - 4), 1)
+                                pygame.draw.line(self.screen, border_color, (rx + TILE_SIZE - 4, ry + 3), (rx + 3, ry + TILE_SIZE - 4), 1)
             
             # Highlight hovered cell
             mouse_x, mouse_y = pygame.mouse.get_pos()
@@ -309,12 +358,14 @@ class Game:
             r = int((mouse_y - self.level_offset_y) // TILE_SIZE)
             if 0 <= r < len(self.active_level_grid) and 0 <= c < len(self.active_level_grid[0]):
                 highlight = pygame.Rect(self.level_offset_x + c * TILE_SIZE, self.level_offset_y + r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-                pygame.draw.rect(self.screen, COLOR_HIGHLIGHT, highlight, 2)
+                on_player = self.player and highlight.colliderect(self.player.rect.inflate(-2, -2))
+                hl_color = COLOR_LOSE if on_player else COLOR_HIGHLIGHT
+                pygame.draw.rect(self.screen, hl_color, highlight, 2)
             
             # Draw UI Panel
             if self.title_font and self.default_font:
                 draw_text(self.screen, "EDIT MODE (Paused)", 24, SCREEN_WIDTH / 2, 30, self.title_font, COLOR_WIN)
-                total_edits = self.edits_used + len(self.current_edit_session)
+                total_edits = self.edits_used
                 color_score = COLOR_WIN if total_edits <= MAX_EDITS_FOR_FULL_POINTS else COLOR_TITLE
                 draw_text(self.screen, f"Edits Used: {total_edits} (Par: {MAX_EDITS_FOR_FULL_POINTS})", 12, SCREEN_WIDTH / 2, 70, self.default_font, color_score)
                 
@@ -333,7 +384,8 @@ class Game:
                         # Number hint
                         draw_text(self.screen, str(i+1), 8, bx + TILE_SIZE/2, palette_y + TILE_SIZE + 8, self.small_font, COLOR_TEXT)
 
-                draw_text(self.screen, "Left Click: Place | Right Click: Remove | Z: Undo | R: Hard Reset Level", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 20, self.small_font, COLOR_INFO)
+                draw_text(self.screen, "Left Click: Place | Right Click: Remove | Z: Undo | R: Hard Reset Level", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 30, self.small_font, COLOR_INFO)
+                draw_text(self.screen, "(Yellow border = Added block | Red X = Removed block)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 15, self.small_font, COLOR_TITLE)
 
         # --- Draw HUD ---
         if self.small_font:  # Draw Level Text
