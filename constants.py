@@ -37,6 +37,12 @@ COLOR_LOSE = (255, 100, 100)
 COLOR_HAZARD_1 = (255, 0, 0)
 COLOR_HAZARD_2 = (200, 0, 0)
 COLOR_LEVEL = (220, 100, 255)
+COLOR_GRID = (50, 50, 70) # Subtle edit grid color
+COLOR_HIGHLIGHT = (255, 255, 255) # Highlight hovered cell
+COLOR_UI_BG = (0, 0, 0, 180) # Semi-transparent UI background for editor
+
+# --- Scoring ---
+MAX_EDITS_FOR_FULL_POINTS = 3
 
 # --- Folders ---
 # Determine the absolute path of the game's root directory

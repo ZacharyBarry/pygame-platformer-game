@@ -41,6 +41,15 @@ class Game:
         self.total_levels = len(levels.LEVELS)
         self.player_start_pos = (0, 0)
 
+        # --- Editor Mode State ---
+        self.editing = False
+        self.edits_used = 0
+        self.current_edit_session = []
+        self.selected_block_type = 'X'
+        self.active_level_grid = []
+        self.level_offset_x = 0
+        self.level_offset_y = 0
+
         # Asset storage
         self.platform_images = {};
         self.img_hazard = [];
@@ -109,21 +118,34 @@ class Game:
         else: print("Assets loaded successfully.")
 
 
-    def _load_level(self, level_index):
+    def _load_level(self, level_index, hard_reset=False):
         if not (0 <= level_index < len(levels.LEVELS)): print(f"Error: Invalid level index {level_index}"); self.playing = False; self.running = False; return
         print(f"Loading Level {level_index + 1}...")
-        level_map = levels.LEVELS[level_index]; self.current_level_index = level_index
+        
+        if hard_reset or level_index != getattr(self, 'loaded_level_layout_index', -1) or not self.active_level_grid:
+            self.active_level_grid = [list(row) for row in levels.LEVELS[level_index]]
+            self.loaded_level_layout_index = level_index
+            self.edits_used = 0
+            self.current_edit_session = []
+
+        level_map = self.active_level_grid
+        self.current_level_index = level_index
         self.all_sprites.empty(); self.platforms.empty(); self.hazards.empty(); self.goals.empty(); self.player_sprite.empty()
         level_h_tiles = len(level_map); level_w_tiles = len(level_map[0]) if level_h_tiles > 0 else 0
         level_pixel_h = level_h_tiles * TILE_SIZE; level_pixel_w = level_w_tiles * TILE_SIZE
         offset_x = max(0, (SCREEN_WIDTH - level_pixel_w) // 2); offset_y = max(0, (SCREEN_HEIGHT - level_pixel_h) // 2)
+        self.level_offset_x = offset_x
+        self.level_offset_y = offset_y
         player_found = False
         for r, row in enumerate(level_map):
             for c, tile_char in enumerate(row):
                 x = offset_x + c * TILE_SIZE; y = offset_y + r * TILE_SIZE
                 if tile_char in self.platform_images: # Platform
                     img = self.platform_images.get(tile_char)
-                    if img: plat = Platform(x, y, img, tile_type=tile_char); self.all_sprites.add(plat); self.platforms.add(plat)
+                    if img:
+                        plat = Platform(x, y, img, tile_type=tile_char)
+                        plat.grid_pos = (r, c)
+                        self.all_sprites.add(plat); self.platforms.add(plat)
                 elif tile_char == 'H': # Hazard
                     if self.img_hazard: haz = Hazard(x, y, self.img_hazard); self.all_sprites.add(haz); self.hazards.add(haz)
                 elif tile_char == 'G': # Goal
@@ -143,21 +165,76 @@ class Game:
     def _handle_events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT: self.playing = False; self.running = False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE: self.playing = False; self.running = False
-                elif event.key == pygame.K_r: # Reload
-                    if self.playing:
-                        print(f"--- Reloading Level {self.current_level_index + 1} ---")
-                        try: importlib.reload(levels); self.total_levels = len(levels.LEVELS)
-                        except Exception as e: print(f"!!! ERROR Reloading: {e} !!!"); continue # Skip load if reload failed
-                        self._load_level(self.current_level_index)
-                    else: print("Cannot reload: Not playing.")
-                # Player Controls
-                elif self.player and self.player_sprite.sprite:
-                    if self.player.state not in ['hit', 'dying', 'dodging'] and not self.player.invincible:
-                        if event.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w): self.player.jump()
-                    if self.player.state in ['idle', 'walking'] and self.player.on_ground:
-                         if event.key == pygame.K_LSHIFT: self.player.dodge()
+            
+            if self.editing:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE: self.playing = False; self.running = False
+                    elif event.key == pygame.K_e:
+                        self.editing = False
+                        self.edits_used += len(self.current_edit_session)
+                        self.current_edit_session = []
+                    elif event.key == pygame.K_r:
+                        print(f"--- Hard Reset Level {self.current_level_index + 1} ---")
+                        self.editing = False
+                        self._load_level(self.current_level_index, hard_reset=True)
+                    elif event.key == pygame.K_z:
+                        if self.current_edit_session:
+                            action = self.current_edit_session.pop()
+                            action_type, (r, c), tile_char = action
+                            if action_type == 'add':
+                                self.active_level_grid[r][c] = '.'
+                                for plat in self.platforms:
+                                    if hasattr(plat, 'grid_pos') and plat.grid_pos == (r, c): plat.kill(); break
+                            elif action_type == 'remove':
+                                self.active_level_grid[r][c] = tile_char
+                                img = self.platform_images.get(tile_char)
+                                x = self.level_offset_x + c * TILE_SIZE; y = self.level_offset_y + r * TILE_SIZE
+                                plat = Platform(x, y, img, tile_type=tile_char)
+                                plat.grid_pos = (r, c)
+                                self.all_sprites.add(plat); self.platforms.add(plat)
+                    elif event.key == pygame.K_1: self.selected_block_type = 'X'
+                    elif event.key == pygame.K_2: self.selected_block_type = 'S'
+                    elif event.key == pygame.K_3: self.selected_block_type = 'F'
+                    elif event.key == pygame.K_4: self.selected_block_type = 'I'
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    mouse_x, mouse_y = pygame.mouse.get_pos()
+                    c = int((mouse_x - self.level_offset_x) // TILE_SIZE)
+                    r = int((mouse_y - self.level_offset_y) // TILE_SIZE)
+                    if 0 <= r < len(self.active_level_grid) and 0 <= c < len(self.active_level_grid[0]):
+                        if event.button == 1: # Left
+                            if self.active_level_grid[r][c] == '.':
+                                self.active_level_grid[r][c] = self.selected_block_type
+                                self.current_edit_session.append(('add', (r, c), self.selected_block_type))
+                                img = self.platform_images.get(self.selected_block_type)
+                                x = self.level_offset_x + c * TILE_SIZE; y = self.level_offset_y + r * TILE_SIZE
+                                plat = Platform(x, y, img, tile_type=self.selected_block_type)
+                                plat.grid_pos = (r, c)
+                                self.all_sprites.add(plat); self.platforms.add(plat)
+                        elif event.button == 3: # Right
+                            char = self.active_level_grid[r][c]
+                            if char in PLATFORM_TYPES:
+                                self.active_level_grid[r][c] = '.'
+                                self.current_edit_session.append(('remove', (r, c), char))
+                                for plat in self.platforms:
+                                    if hasattr(plat, 'grid_pos') and plat.grid_pos == (r, c): plat.kill(); break
+            else:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE: self.playing = False; self.running = False
+                    elif event.key == pygame.K_e:
+                        if self.playing: self.editing = True
+                    elif event.key == pygame.K_r: # Reload
+                        if self.playing:
+                            print(f"--- Reloading Level {self.current_level_index + 1} ---")
+                            try: importlib.reload(levels); self.total_levels = len(levels.LEVELS)
+                            except Exception as e: print(f"!!! ERROR Reloading: {e} !!!"); continue # Skip load if reload failed
+                            self._load_level(self.current_level_index)
+                        else: print("Cannot reload: Not playing.")
+                    # Player Controls
+                    elif self.player and self.player_sprite.sprite:
+                        if self.player.state not in ['hit', 'dying', 'dodging'] and not self.player.invincible:
+                            if event.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w): self.player.jump()
+                        if self.player.state in ['idle', 'walking'] and self.player.on_ground:
+                             if event.key == pygame.K_LSHIFT: self.player.dodge()
 
 
     # --- The rest of the Game class methods remain unchanged ---
@@ -197,6 +274,7 @@ class Game:
     def _update(self):
         """Updates all game objects and checks game conditions."""
         if not self.playing: return
+        if self.editing: return
         self.all_sprites.update()
         if self.player and self.player_sprite.sprite:
              if self.player.rect.top > SCREEN_HEIGHT + TILE_SIZE * 2:
@@ -211,6 +289,51 @@ class Game:
         else:
             self.screen.fill(COLOR_BG)
         self.all_sprites.draw(self.screen)
+
+        # --- Draw Editor ---
+        if self.editing:
+            # Draw overlay
+            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+            overlay.fill(COLOR_UI_BG)
+            self.screen.blit(overlay, (0, 0))
+            
+            # Draw subtle grid
+            for r in range(len(self.active_level_grid)):
+                for c in range(len(self.active_level_grid[0])):
+                    rect = pygame.Rect(self.level_offset_x + c * TILE_SIZE, self.level_offset_y + r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+                    pygame.draw.rect(self.screen, COLOR_GRID, rect, 1)
+            
+            # Highlight hovered cell
+            mouse_x, mouse_y = pygame.mouse.get_pos()
+            c = int((mouse_x - self.level_offset_x) // TILE_SIZE)
+            r = int((mouse_y - self.level_offset_y) // TILE_SIZE)
+            if 0 <= r < len(self.active_level_grid) and 0 <= c < len(self.active_level_grid[0]):
+                highlight = pygame.Rect(self.level_offset_x + c * TILE_SIZE, self.level_offset_y + r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+                pygame.draw.rect(self.screen, COLOR_HIGHLIGHT, highlight, 2)
+            
+            # Draw UI Panel
+            if self.title_font and self.default_font:
+                draw_text(self.screen, "EDIT MODE (Paused)", 24, SCREEN_WIDTH / 2, 30, self.title_font, COLOR_WIN)
+                total_edits = self.edits_used + len(self.current_edit_session)
+                color_score = COLOR_WIN if total_edits <= MAX_EDITS_FOR_FULL_POINTS else COLOR_TITLE
+                draw_text(self.screen, f"Edits Used: {total_edits} (Par: {MAX_EDITS_FOR_FULL_POINTS})", 12, SCREEN_WIDTH / 2, 70, self.default_font, color_score)
+                
+                # Draw Visual Block Palette
+                palette_x_start = SCREEN_WIDTH / 2 - 70
+                palette_y = 95
+                block_keys = ['X', 'S', 'F', 'I']
+                for i, block_key in enumerate(block_keys):
+                    img = self.platform_images.get(block_key)
+                    if img:
+                        bx = palette_x_start + i * 40
+                        # Highlight if selected
+                        if block_key == self.selected_block_type:
+                            pygame.draw.rect(self.screen, COLOR_WIN, (bx - 4, palette_y - 4, TILE_SIZE + 8, TILE_SIZE + 8), 2)
+                        self.screen.blit(img, (bx, palette_y))
+                        # Number hint
+                        draw_text(self.screen, str(i+1), 8, bx + TILE_SIZE/2, palette_y + TILE_SIZE + 8, self.small_font, COLOR_TEXT)
+
+                draw_text(self.screen, "Left Click: Place | Right Click: Remove | Z: Undo | R: Hard Reset Level", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 20, self.small_font, COLOR_INFO)
 
         # --- Draw HUD ---
         if self.small_font:  # Draw Level Text
@@ -254,7 +377,23 @@ class Game:
         """Called when the player collides with the Goal."""
         if not self.playing: return
         print(f"Level {self.current_level_index + 1} Complete!"); self.playing = False
-        # <-- 2. Access LEVELS via the module -->
+        
+        # Display score popup
+        if self.title_font and self.default_font:
+            self._draw() # Render the frame
+            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 200))
+            self.screen.blit(overlay, (0, 0))
+            draw_text(self.screen, "LEVEL CLEARED!", 24, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 3, self.title_font, COLOR_WIN)
+            if self.edits_used <= MAX_EDITS_FOR_FULL_POINTS:
+                draw_text(self.screen, f"PERFECT! (Edits: {self.edits_used}/{MAX_EDITS_FOR_FULL_POINTS})", 16, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, self.default_font, COLOR_WIN)
+            else:
+                draw_text(self.screen, f"GOOD! (Edits: {self.edits_used})", 16, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, self.default_font, COLOR_TITLE)
+            draw_text(self.screen, "Press any key to continue...", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 2 / 3, self.default_font, COLOR_TEXT)
+            pygame.display.flip()
+            self._wait_for_key()
+
+        # <-- Access LEVELS via the module -->
         if self.current_level_index + 1 < len(levels.LEVELS):
             if self.sound_win_level: self.sound_win_level.play()
             self.next_level_pending = True
@@ -264,17 +403,40 @@ class Game:
 
     def show_start_screen(self):
         if not self.title_font or not self.default_font or not self.small_font: print("Cannot show start screen - fonts missing."); self.running = False; return
-        self.screen.fill(COLOR_BG)
-        draw_text(self.screen, TITLE, 24, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 4, self.title_font, COLOR_TITLE)
-        draw_text(self.screen, "Arrows/AD Move, Space/Up/W Jump", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, self.default_font, COLOR_INFO)
-        draw_text(self.screen, "LShift Dodge", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 25, self.default_font, COLOR_INFO)
-        draw_text(self.screen, "Reach Goal (Gold Block)", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 60, self.default_font, COLOR_TITLE)
-        draw_text(self.screen, "Avoid Hazards (Red) - 3 Hits!", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 85, self.default_font, COLOR_LOSE)
-        draw_text(self.screen, f"Mode: {self.game_mode.upper()} (Edit game.py to change)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 115, self.small_font, COLOR_INFO) # Show current mode
-        draw_text(self.screen, "Press any key to start", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 3 / 4, self.default_font, COLOR_TEXT)
-        draw_text(self.screen, "(R to Reload Level while playing)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 3 / 4 + 30, self.small_font, COLOR_INFO)
-        draw_text(self.screen, "(ESC to Quit)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 3 / 4 + 50, self.small_font, COLOR_TEXT)
-        pygame.display.flip(); self._wait_for_key(allow_quit=True)
+        
+        # Add a dark semi-transparent overlay to make text pop against background
+        if self.img_background:
+            self.screen.blit(self.img_background, (0, 0))
+            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 180)) # Darken background
+            self.screen.blit(overlay, (0, 0))
+        else:
+            self.screen.fill(COLOR_BG)
+            
+        # Title
+        draw_text(self.screen, TITLE, 32, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 4, self.title_font, COLOR_TITLE)
+        
+        # Subtitle
+        draw_text(self.screen, "A Retro Puzzle Platformer", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 4 + 40, self.default_font, COLOR_INFO)
+
+        # Controls Section
+        start_y = SCREEN_HEIGHT / 2 - 20
+        draw_text(self.screen, "--- CONTROLS ---", 16, SCREEN_WIDTH / 2, start_y, self.default_font, COLOR_TEXT)
+        draw_text(self.screen, "Move: Arrows / A & D", 12, SCREEN_WIDTH / 2, start_y + 35, self.default_font, COLOR_WIN)
+        draw_text(self.screen, "Jump: Space / W / Up", 12, SCREEN_WIDTH / 2, start_y + 55, self.default_font, COLOR_WIN)
+        draw_text(self.screen, "Dodge Roll: Left Shift", 12, SCREEN_WIDTH / 2, start_y + 75, self.default_font, COLOR_INFO)
+        
+        # Edit Mode Section
+        draw_text(self.screen, "--- LEVEL EDITOR ---", 16, SCREEN_WIDTH / 2, start_y + 115, self.default_font, COLOR_TEXT)
+        draw_text(self.screen, "Press 'E' to pause and edit difficult levels!", 12, SCREEN_WIDTH / 2, start_y + 150, self.default_font, COLOR_WIN)
+        draw_text(self.screen, "Beat the level in under 3 edits for a PERFECT score.", 10, SCREEN_WIDTH / 2, start_y + 175, self.default_font, COLOR_TEXT)
+        
+        # Bottom prompts
+        draw_text(self.screen, "Press any key to embark...", 16, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 3 / 4 + 40, self.default_font, COLOR_TITLE)
+        draw_text(self.screen, f"Current Mode: {self.game_mode.upper()} | (ESC to Quit)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 30, self.small_font, COLOR_TEXT)
+        
+        pygame.display.flip()
+        self._wait_for_key(allow_quit=True)
 
     def show_game_over_screen(self): # This screen now primarily shows for Hardcore mode 'Game Over'
         if not self.running or not self.title_font or not self.default_font or not self.small_font: return

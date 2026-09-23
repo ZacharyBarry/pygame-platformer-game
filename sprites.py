@@ -127,10 +127,6 @@ class Player(pygame.sprite.Sprite):
         if self.state != new_state:
             self.state = new_state; self.current_frame_idx = 0
             self.last_anim_update = pygame.time.get_ticks(); self.state_timer = pygame.time.get_ticks()
-            # If entering a normal state, ensure invincibility is off (might be interrupted)
-            if new_state in ['idle', 'walking', 'jumping']:
-                self.invincible = False
-                self.visible = True
 
     def update(self):
         """Update player physics, state, animation, and invincibility."""
@@ -380,6 +376,7 @@ class Platform(pygame.sprite.Sprite):
         super().__init__()
         self.image = image
         self.tile_type = tile_type # Store the type ('X', 'S', 'F', 'I', etc.)
+        self.grid_pos = (0, 0) # Store grid coordinates for level editor
         if self.image is None:
              print(f"Warning: Platform '{tile_type}' created with no image at ({x},{y}). Using fallback.")
              self.image = pygame.Surface((TILE_SIZE, TILE_SIZE)); self.image.fill(COLOR_INFO)
