@@ -11,7 +11,14 @@ from constants import * # Import all constants
 import levels            # <-- 2. Import the module itself
 from assets import load_image, load_sound, load_music, load_font
 from utils import draw_text
-from sprites import Player, Platform, Hazard, Goal, CrawlerEnemy, FlyerEnemy # Import sprite classes
+from sprites import Player, Platform, Hazard, Goal, CrawlerEnemy, FlyerEnemy, BossEnemy, TooltipTile # Import sprite classes
+
+LEVEL_NAMES = [
+    "Awakening", "Bloom", "Hazards", "Climb", "Ice Intro",
+    "Labyrinth", "Dodge Test", "Slide Run", "Gauntlet", "Ice Finale",
+    "Islands", "Hazard Maze", "Ice Cavern", "Pillars", "Dunes",
+    "Split Paths", "Ice & Fire", "Fortress", "Precision", "Citadel"
+]
 
 class Game:
     """
@@ -28,6 +35,8 @@ class Game:
         self.running = True;
         self.playing = False
         self.dt = 0
+        self.screen_shake = 0
+        self.display_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
 
         # --- Game Mode & State ---
         self.game_mode = "normal"  # Options: "normal", "hardcore" <-- SET DEFAULT MODE HERE
@@ -65,6 +74,8 @@ class Game:
         self.title_font = None;
         self.default_font = None;
         self.small_font = None
+        
+        self.volumes = {'Master': 1.0, 'SFX': 1.0, 'Music': 0.3}
 
         # Sprite groups
         self.all_sprites = pygame.sprite.Group();
@@ -72,6 +83,7 @@ class Game:
         self.hazards = pygame.sprite.Group();
         self.goals = pygame.sprite.Group()
         self.enemies = pygame.sprite.Group()
+        self.tooltips = pygame.sprite.Group()
         self.player_sprite = pygame.sprite.GroupSingle()
 
         self._load_assets()
@@ -116,10 +128,9 @@ class Game:
         except Exception as e: print(f"    - ERROR creating hazard: {e}"); any_fail = True; #... fallback ...
         print("  Loading sounds..."); # ... sound loading ...
         self.sound_jump = load_sound(SND_JUMP); self.sound_hit = load_sound(SND_HIT); self.sound_win_level = load_sound(SND_WIN_LEVEL); self.sound_win_game = load_sound(SND_WIN_GAME); self.sound_game_over = load_sound(SND_GAME_OVER)
-        if self.sound_jump: self.sound_jump.set_volume(0.2)
         print("  Loading music..."); # ... music loading ...
-        if load_music(MUS_BACKGROUND): pygame.mixer.music.set_volume(0.3);
-        else: print(f"    ! Warning: Music load failed.")
+        load_music(MUS_BACKGROUND)
+        self._apply_volumes()
 
         # --- Load UI Images ---
         print("  Loading UI images...")
@@ -149,7 +160,7 @@ class Game:
 
         level_map = self.active_level_grid
         self.current_level_index = level_index
-        self.all_sprites.empty(); self.platforms.empty(); self.hazards.empty(); self.goals.empty(); self.enemies.empty(); self.player_sprite.empty()
+        self.all_sprites.empty(); self.platforms.empty(); self.hazards.empty(); self.goals.empty(); self.enemies.empty(); self.tooltips.empty(); self.player_sprite.empty()
         level_h_tiles = len(level_map); level_w_tiles = len(level_map[0]) if level_h_tiles > 0 else 0
         level_pixel_h = level_h_tiles * TILE_SIZE; level_pixel_w = level_w_tiles * TILE_SIZE
         offset_x = max(0, (SCREEN_WIDTH - level_pixel_w) // 2); offset_y = max(0, (SCREEN_HEIGHT - level_pixel_h) // 2)
@@ -177,6 +188,12 @@ class Game:
                 elif tile_char == 'B': # Flyer Airborne Enemy ("Bat")
                     flyer = FlyerEnemy(self, x, y)
                     self.all_sprites.add(flyer); self.enemies.add(flyer)
+                elif tile_char == 'Z': # Boss Enemy
+                    boss = BossEnemy(self, x, y)
+                    self.all_sprites.add(boss); self.enemies.add(boss)
+                elif tile_char == 'T': # Tooltip
+                    tip = TooltipTile(x, y, "Use Edits to reach the goal!")
+                    self.all_sprites.add(tip); self.tooltips.add(tip)
                 elif tile_char == 'P': # Player Start
                     if not player_found: self.player_start_pos = (x, y); player_found = True
                     else: print(f"Warning: Multiple 'P'...")
@@ -193,7 +210,8 @@ class Game:
             
             if self.editing:
                 if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE: self.playing = False; self.running = False
+                    if event.key == pygame.K_ESCAPE: 
+                        self.show_pause_menu()
                     elif event.key == pygame.K_e:
                         self.editing = False
                         self.current_edit_session = []
@@ -220,14 +238,22 @@ class Game:
                     elif event.key == pygame.K_2: self.selected_block_type = 'S'
                     elif event.key == pygame.K_3: self.selected_block_type = 'F'
                     elif event.key == pygame.K_4: self.selected_block_type = 'I'
-                    elif event.key == pygame.K_l:
-                        chosen = self.show_level_select_screen()
-                        if chosen is not None:
-                            self.editing = False
-                            self.current_level_index = chosen
-                            self._load_level(chosen, hard_reset=True)
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     mouse_x, mouse_y = pygame.mouse.get_pos()
+                    
+                    # Check UI clicks
+                    palette_x_start = SCREEN_WIDTH / 2 - 70
+                    palette_y = 95
+                    block_keys = ['X', 'S', 'F', 'I']
+                    clicked_ui = False
+                    for i, block_key in enumerate(block_keys):
+                        bx = palette_x_start + i * 40
+                        if bx <= mouse_x <= bx + TILE_SIZE and palette_y <= mouse_y <= palette_y + TILE_SIZE:
+                            if event.button == 1: self.selected_block_type = block_key
+                            clicked_ui = True
+                            break
+                    if clicked_ui: continue
+
                     c = int((mouse_x - self.level_offset_x) // TILE_SIZE)
                     r = int((mouse_y - self.level_offset_y) // TILE_SIZE)
                     if 0 <= r < len(self.active_level_grid) and 0 <= c < len(self.active_level_grid[0]):
@@ -255,7 +281,8 @@ class Game:
                                     if hasattr(plat, 'grid_pos') and plat.grid_pos == (r, c): plat.kill(); break
             else:
                 if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE: self.playing = False; self.running = False
+                    if event.key == pygame.K_ESCAPE: 
+                        self.show_pause_menu()
                     elif event.key == pygame.K_e:
                         if self.playing: self.editing = True
                     elif event.key == pygame.K_r: # Reload
@@ -265,12 +292,6 @@ class Game:
                             except Exception as e: print(f"!!! ERROR Reloading: {e} !!!"); continue # Skip load if reload failed
                             self._load_level(self.current_level_index)
                         else: print("Cannot reload: Not playing.")
-                    elif event.key == pygame.K_l: # Level Select
-                        if self.playing:
-                            chosen = self.show_level_select_screen()
-                            if chosen is not None:
-                                self.current_level_index = chosen
-                                self._load_level(chosen, hard_reset=True)
                     # Player Controls
                     elif self.player and self.player_sprite.sprite:
                         if self.player.state not in ['hit', 'dying', 'dodging'] and not self.player.invincible:
@@ -313,8 +334,14 @@ class Game:
             self._draw()
         print(f"Exiting level {self.current_level_index + 1} gameplay loop.")
 
+    def add_shake(self, intensity):
+        self.screen_shake = max(self.screen_shake, intensity)
+
     def _update(self):
         """Updates all game objects and checks game conditions."""
+        if self.screen_shake > 0:
+            self.screen_shake = max(0, self.screen_shake - 1)
+            
         if not self.playing: return
         if self.editing: return
         self.all_sprites.update()
@@ -327,10 +354,10 @@ class Game:
     def _draw(self):
         """Draws the background, sprites, and HUD (including hearts)."""
         if self.img_background:
-            self.screen.blit(self.img_background, (0, 0))
+            self.display_surface.blit(self.img_background, (0, 0))
         else:
-            self.screen.fill(COLOR_BG)
-        self.all_sprites.draw(self.screen)
+            self.display_surface.fill(COLOR_BG)
+        self.all_sprites.draw(self.display_surface)
 
         # --- Draw Player Overhead Healthbar ---
         if self.player and self.player_sprite.sprite and self.player.alive() and self.player.state != 'dying' and self.player.visible:
@@ -339,8 +366,8 @@ class Game:
             bar_x = self.player.rect.centerx - bar_w // 2
             bar_y = self.player.rect.top - 6
             # Background / Border
-            pygame.draw.rect(self.screen, (20, 20, 25), (bar_x - 1, bar_y - 1, bar_w + 2, bar_h + 2))
-            pygame.draw.rect(self.screen, (60, 60, 70), (bar_x, bar_y, bar_w, bar_h))
+            pygame.draw.rect(self.display_surface, (20, 20, 25), (bar_x - 1, bar_y - 1, bar_w + 2, bar_h + 2))
+            pygame.draw.rect(self.display_surface, (60, 60, 70), (bar_x, bar_y, bar_w, bar_h))
             
             # Health width & color: starts green, turns red when hit
             pct = max(0.0, min(1.0, self.player.health / self.player.max_health))
@@ -353,20 +380,20 @@ class Game:
                 health_color = (230, 40, 40) # Bright Red
             
             if fill_w > 0:
-                pygame.draw.rect(self.screen, health_color, (bar_x, bar_y, fill_w, bar_h))
+                pygame.draw.rect(self.display_surface, health_color, (bar_x, bar_y, fill_w, bar_h))
 
         # --- Draw Editor ---
         if self.editing:
             # Draw overlay
             overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
             overlay.fill(COLOR_UI_BG)
-            self.screen.blit(overlay, (0, 0))
+            self.display_surface.blit(overlay, (0, 0))
             
             # Draw subtle grid
             for r in range(len(self.active_level_grid)):
                 for c in range(len(self.active_level_grid[0])):
                     rect = pygame.Rect(self.level_offset_x + c * TILE_SIZE, self.level_offset_y + r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-                    pygame.draw.rect(self.screen, COLOR_GRID, rect, 1)
+                    pygame.draw.rect(self.display_surface, COLOR_GRID, rect, 1)
 
             # Highlight modified / edited cells
             if 0 <= self.current_level_index < len(levels.LEVELS):
@@ -384,17 +411,17 @@ class Game:
                                 fill_color = (255, 220, 0, 80 if pulse else 120)
                                 border_color = (255, 240, 90) if pulse else (255, 190, 0)
                                 edit_surf.fill(fill_color)
-                                self.screen.blit(edit_surf, (rx, ry))
-                                pygame.draw.rect(self.screen, border_color, rect, 2)
+                                self.display_surface.blit(edit_surf, (rx, ry))
+                                pygame.draw.rect(self.display_surface, border_color, rect, 2)
                             else:
                                 # Removed block: highlight empty slot in soft red with an indicator
                                 fill_color = (255, 60, 60, 70 if pulse else 110)
                                 border_color = (255, 100, 100) if pulse else (200, 50, 50)
                                 edit_surf.fill(fill_color)
-                                self.screen.blit(edit_surf, (rx, ry))
-                                pygame.draw.rect(self.screen, border_color, rect, 2)
-                                pygame.draw.line(self.screen, border_color, (rx + 3, ry + 3), (rx + TILE_SIZE - 4, ry + TILE_SIZE - 4), 1)
-                                pygame.draw.line(self.screen, border_color, (rx + TILE_SIZE - 4, ry + 3), (rx + 3, ry + TILE_SIZE - 4), 1)
+                                self.display_surface.blit(edit_surf, (rx, ry))
+                                pygame.draw.rect(self.display_surface, border_color, rect, 2)
+                                pygame.draw.line(self.display_surface, border_color, (rx + 3, ry + 3), (rx + TILE_SIZE - 4, ry + TILE_SIZE - 4), 1)
+                                pygame.draw.line(self.display_surface, border_color, (rx + TILE_SIZE - 4, ry + 3), (rx + 3, ry + TILE_SIZE - 4), 1)
             
             # Highlight hovered cell
             mouse_x, mouse_y = pygame.mouse.get_pos()
@@ -404,14 +431,14 @@ class Game:
                 highlight = pygame.Rect(self.level_offset_x + c * TILE_SIZE, self.level_offset_y + r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
                 on_player = self.player and highlight.colliderect(self.player.rect.inflate(-2, -2))
                 hl_color = COLOR_LOSE if on_player else COLOR_HIGHLIGHT
-                pygame.draw.rect(self.screen, hl_color, highlight, 2)
+                pygame.draw.rect(self.display_surface, hl_color, highlight, 2)
             
             # Draw UI Panel
             if self.title_font and self.default_font:
-                draw_text(self.screen, "EDIT MODE (Paused)", 24, SCREEN_WIDTH / 2, 30, self.title_font, COLOR_WIN)
+                draw_text(self.display_surface, "EDIT MODE (Paused)", 24, SCREEN_WIDTH / 2, 30, self.title_font, COLOR_WIN)
                 total_edits = self.edits_used
                 color_score = COLOR_WIN if total_edits <= MAX_EDITS_FOR_FULL_POINTS else COLOR_TITLE
-                draw_text(self.screen, f"Edits Used: {total_edits} (Par: {MAX_EDITS_FOR_FULL_POINTS})", 12, SCREEN_WIDTH / 2, 70, self.default_font, color_score)
+                draw_text(self.display_surface, f"Edits Used: {total_edits} (Par: {MAX_EDITS_FOR_FULL_POINTS})", 12, SCREEN_WIDTH / 2, 70, self.default_font, color_score)
                 
                 # Draw Visual Block Palette
                 palette_x_start = SCREEN_WIDTH / 2 - 70
@@ -423,18 +450,24 @@ class Game:
                         bx = palette_x_start + i * 40
                         # Highlight if selected
                         if block_key == self.selected_block_type:
-                            pygame.draw.rect(self.screen, COLOR_WIN, (bx - 4, palette_y - 4, TILE_SIZE + 8, TILE_SIZE + 8), 2)
-                        self.screen.blit(img, (bx, palette_y))
+                            pygame.draw.rect(self.display_surface, COLOR_WIN, (bx - 4, palette_y - 4, TILE_SIZE + 8, TILE_SIZE + 8), 2)
+                        self.display_surface.blit(img, (bx, palette_y))
                         # Number hint
-                        draw_text(self.screen, str(i+1), 8, bx + TILE_SIZE/2, palette_y + TILE_SIZE + 8, self.small_font, COLOR_TEXT)
+                        draw_text(self.display_surface, str(i+1), 8, bx + TILE_SIZE/2, palette_y + TILE_SIZE + 8, self.small_font, COLOR_TEXT)
 
-                draw_text(self.screen, "Left Click: Place | Right Click: Remove | Z: Undo | R: Hard Reset Level", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 30, self.small_font, COLOR_INFO)
-                draw_text(self.screen, "(Yellow border = Added block | Red X = Removed block)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 15, self.small_font, COLOR_TITLE)
+                draw_text(self.display_surface, "Left Click: Place | Right Click: Remove | Z: Undo | R: Hard Reset Level", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 30, self.small_font, COLOR_INFO)
+                draw_text(self.display_surface, "(Yellow border = Added block | Red X = Removed block)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 15, self.small_font, COLOR_TITLE)
 
         # --- Draw HUD ---
         if self.small_font:  # Draw Level Text
-            draw_text(self.screen, f"Lvl: {self.current_level_index + 1}/{self.total_levels}",
+            draw_text(self.display_surface, f"Lvl: {self.current_level_index + 1}/{self.total_levels}",
                       8, SCREEN_WIDTH - 35, 5, self.small_font, COLOR_LEVEL)
+                      
+        # --- Draw Tooltips ---
+        if self.player and self.player.alive():
+            for tip in self.tooltips:
+                if tip.rect.colliderect(self.player.rect.inflate(30, 30)):
+                    draw_text(self.display_surface, tip.text, 12, tip.rect.centerx, tip.rect.top - 20, self.default_font, COLOR_WIN)
 
         # --- Draw Hearts ---
         if self.img_heart and self.player:  # Check heart image loaded and player exists
@@ -444,12 +477,20 @@ class Game:
 
             # Draw filled hearts for current health
             for i in range(self.player.health):
-                self.screen.blit(self.img_heart, (heart_x + i * heart_spacing, heart_y))
+                self.display_surface.blit(self.img_heart, (heart_x + i * heart_spacing, heart_y))
 
             # Optional: Draw empty hearts for missing health
             if self.img_heart_empty:
                 for i in range(self.player.health, self.player.max_health):
-                    self.screen.blit(self.img_heart_empty, (heart_x + i * heart_spacing, heart_y))
+                    self.display_surface.blit(self.img_heart_empty, (heart_x + i * heart_spacing, heart_y))
+                    
+        # Apply Screen Shake and Blit to actual screen
+        shake_x = random.randint(-self.screen_shake, self.screen_shake) if self.screen_shake > 0 else 0
+        shake_y = random.randint(-self.screen_shake, self.screen_shake) if self.screen_shake > 0 else 0
+        
+        # Clear physical screen first (to avoid artifacts from shake)
+        self.screen.fill(COLOR_BG)
+        self.screen.blit(self.display_surface, (shake_x, shake_y))
             # Alternative if no empty heart image: Draw total number of heart outlines? Or just show current health?
             # Simpler: Just show the current filled hearts.
 
@@ -497,16 +538,431 @@ class Game:
             if self.sound_win_game: self.sound_win_game.play()
             pygame.mixer.music.fadeout(500); self.game_won = True
 
+    def _apply_volumes(self):
+        master = self.volumes['Master']
+        sfx_vol = self.volumes['SFX'] * master
+        music_vol = self.volumes['Music'] * master
+        
+        if self.sound_jump: self.sound_jump.set_volume(0.2 * sfx_vol)
+        if self.sound_hit: self.sound_hit.set_volume(1.0 * sfx_vol)
+        if self.sound_win_level: self.sound_win_level.set_volume(1.0 * sfx_vol)
+        if self.sound_win_game: self.sound_win_game.set_volume(1.0 * sfx_vol)
+        if self.sound_game_over: self.sound_game_over.set_volume(1.0 * sfx_vol)
+        pygame.mixer.music.set_volume(music_vol)
+
+    def show_pause_menu(self):
+        """Displays the unified pause menu with tabs, sliders, and level select."""
+        menu_active = True
+        
+        # Capture current game frame to display as frozen backdrop
+        bg_snapshot = self.screen.copy()
+        
+        # Tabs: 0: "MENU", 1: "AUDIO", 2: "CONTROLS"
+        TABS = ["MENU", "AUDIO SETTINGS", "CONTROLS"]
+        current_tab = 0
+        
+        # Menu options for Tab 0
+        menu_options = [
+            ("RESUME GAME", "Return directly to your game", COLOR_WIN),
+            ("RESTART LEVEL", "Start current level over from start", COLOR_TITLE),
+            ("LEVEL SELECT", "Choose any level (Dev / Testing Portal)", COLOR_INFO),
+            ("AUDIO SETTINGS", "Adjust Master, Music, and SFX volumes", (210, 190, 255)),
+            ("CONTROLS & HELP", "View movement, dodge, and editor keys", (180, 220, 255)),
+            ("QUIT TO TITLE", "Save progress and return to Title Screen", COLOR_LOSE)
+        ]
+        selected_menu_idx = 0
+        
+        # Audio rows for Tab 1
+        audio_keys = ["Master", "SFX", "Music"]
+        audio_labels = {
+            "Master": "MASTER VOLUME",
+            "SFX": "SOUND EFFECTS",
+            "Music": "MUSIC VOLUME"
+        }
+        selected_audio_idx = 0  # 0-2: sliders, 3: test sound, 4: reset defaults, 5: resume
+        dragging_slider = None
+
+        # Modal Box Layout (Centered)
+        modal_w, modal_h = 640, 520
+        modal_x = (SCREEN_WIDTH - modal_w) // 2
+        modal_y = (SCREEN_HEIGHT - modal_h) // 2
+        modal_rect = pygame.Rect(modal_x, modal_y, modal_w, modal_h)
+
+        while menu_active and self.running:
+            self.clock.tick(FPS)
+            mouse_pos = pygame.mouse.get_pos()
+            mouse_clicked = False
+            mouse_held = pygame.mouse.get_pressed()[0]
+            
+            if not mouse_held:
+                dragging_slider = None
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    self.playing = False
+                    return
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 1:
+                        mouse_clicked = True
+                    elif event.button == 4:  # Wheel Up
+                        if current_tab == 0:
+                            selected_menu_idx = (selected_menu_idx - 1) % len(menu_options)
+                        elif current_tab == 1 and selected_audio_idx < len(audio_keys):
+                            k = audio_keys[selected_audio_idx]
+                            self.volumes[k] = round(min(1.0, self.volumes[k] + 0.05), 2)
+                            self._apply_volumes()
+                    elif event.button == 5:  # Wheel Down
+                        if current_tab == 0:
+                            selected_menu_idx = (selected_menu_idx + 1) % len(menu_options)
+                        elif current_tab == 1 and selected_audio_idx < len(audio_keys):
+                            k = audio_keys[selected_audio_idx]
+                            self.volumes[k] = round(max(0.0, self.volumes[k] - 0.05), 2)
+                            self._apply_volumes()
+                elif event.type == pygame.MOUSEBUTTONUP:
+                    if event.button == 1:
+                        dragging_slider = None
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        if current_tab != 0:
+                            current_tab = 0
+                        else:
+                            menu_active = False  # Resume
+                    elif event.key == pygame.K_TAB:
+                        current_tab = (current_tab + 1) % len(TABS)
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        if current_tab == 0:
+                            selected_menu_idx = (selected_menu_idx + 1) % len(menu_options)
+                        elif current_tab == 1:
+                            selected_audio_idx = (selected_audio_idx + 1) % 6
+                    elif event.key in (pygame.K_UP, pygame.K_w):
+                        if current_tab == 0:
+                            selected_menu_idx = (selected_menu_idx - 1) % len(menu_options)
+                        elif current_tab == 1:
+                            selected_audio_idx = (selected_audio_idx - 1) % 6
+                    elif event.key in (pygame.K_LEFT, pygame.K_a):
+                        if current_tab == 1 and selected_audio_idx < len(audio_keys):
+                            k = audio_keys[selected_audio_idx]
+                            self.volumes[k] = round(max(0.0, self.volumes[k] - 0.1), 2)
+                            self._apply_volumes()
+                            if self.sound_jump: self.sound_jump.play()
+                        else:
+                            current_tab = (current_tab - 1) % len(TABS)
+                    elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                        if current_tab == 1 and selected_audio_idx < len(audio_keys):
+                            k = audio_keys[selected_audio_idx]
+                            self.volumes[k] = round(min(1.0, self.volumes[k] + 0.1), 2)
+                            self._apply_volumes()
+                            if self.sound_jump: self.sound_jump.play()
+                        else:
+                            current_tab = (current_tab + 1) % len(TABS)
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if current_tab == 0:
+                            if selected_menu_idx == 0:  # Resume
+                                menu_active = False
+                            elif selected_menu_idx == 1:  # Restart Level
+                                self.editing = False
+                                self._load_level(self.current_level_index, hard_reset=True)
+                                menu_active = False
+                            elif selected_menu_idx == 2:  # Level Select
+                                chosen = self.show_level_select_screen()
+                                if chosen is not None:
+                                    self.editing = False
+                                    self.current_level_index = chosen
+                                    self._load_level(chosen, hard_reset=True)
+                                    menu_active = False
+                                else:
+                                    bg_snapshot = self.screen.copy()
+                            elif selected_menu_idx == 3:  # Audio Settings
+                                current_tab = 1
+                            elif selected_menu_idx == 4:  # Controls Guide
+                                current_tab = 2
+                            elif selected_menu_idx == 5:  # Quit to Title
+                                self.playing = False
+                                menu_active = False
+                        elif current_tab == 1:
+                            if selected_audio_idx == 3:  # Test Sound
+                                if self.sound_jump: self.sound_jump.play()
+                            elif selected_audio_idx == 4:  # Reset Defaults
+                                self.volumes = {'Master': 1.0, 'SFX': 1.0, 'Music': 0.3}
+                                self._apply_volumes()
+                                if self.sound_jump: self.sound_jump.play()
+                            elif selected_audio_idx == 5:  # Resume
+                                menu_active = False
+                        elif current_tab == 2:
+                            menu_active = False
+
+            # --- RENDER PAUSE MENU ---
+            # Draw frozen game backdrop and dark dim overlay
+            self.screen.blit(bg_snapshot, (0, 0))
+            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+            overlay.fill((8, 6, 14, 215))
+            self.screen.blit(overlay, (0, 0))
+
+            # Modal Box
+            pygame.draw.rect(self.screen, (24, 20, 32), modal_rect, border_radius=12)
+            pygame.draw.rect(self.screen, (75, 65, 95), modal_rect, width=2, border_radius=12)
+            pygame.draw.rect(self.screen, (40, 34, 52), modal_rect.inflate(-4, -4), width=1, border_radius=10)
+            pygame.draw.line(self.screen, COLOR_TITLE, (modal_x + 25, modal_y + 2), (modal_x + modal_w - 25, modal_y + 2), width=3)
+
+            # Close [X] Button
+            close_rect = pygame.Rect(modal_x + modal_w - 38, modal_y + 14, 24, 24)
+            close_hover = close_rect.collidepoint(mouse_pos)
+            pygame.draw.rect(self.screen, (190, 45, 55) if close_hover else (45, 38, 55), close_rect, border_radius=4)
+            pygame.draw.rect(self.screen, (255, 120, 120) if close_hover else (80, 70, 95), close_rect, 1, border_radius=4)
+            draw_text(self.screen, "X", 10, close_rect.centerx, close_rect.top + 4, self.default_font, (255, 255, 255))
+            if close_hover and mouse_clicked:
+                menu_active = False
+
+            # Title Header
+            draw_text(self.screen, "PAUSED", 26, SCREEN_WIDTH // 2, modal_y + 14, self.title_font, COLOR_TITLE)
+            lvl_name = LEVEL_NAMES[self.current_level_index] if (0 <= self.current_level_index < len(LEVEL_NAMES)) else f"Level {self.current_level_index + 1}"
+            draw_text(self.screen, f"-- LEVEL {self.current_level_index + 1}: {lvl_name.upper()} --", 10, SCREEN_WIDTH // 2, modal_y + 44, self.default_font, COLOR_INFO)
+
+            # Tab Strip
+            tab_w, tab_h, tab_gap = 175, 32, 12
+            total_tabs_w = len(TABS) * tab_w + (len(TABS) - 1) * tab_gap
+            tab_start_x = modal_x + (modal_w - total_tabs_w) // 2
+            tab_y = modal_y + 68
+
+            for t_idx, t_name in enumerate(TABS):
+                t_rect = pygame.Rect(tab_start_x + t_idx * (tab_w + tab_gap), tab_y, tab_w, tab_h)
+                t_hover = t_rect.collidepoint(mouse_pos)
+                if t_hover and mouse_clicked:
+                    current_tab = t_idx
+
+                if t_idx == current_tab:
+                    pygame.draw.rect(self.screen, (60, 46, 82), t_rect, border_radius=6)
+                    pygame.draw.rect(self.screen, COLOR_TITLE, t_rect, 2, border_radius=6)
+                    draw_text(self.screen, t_name, 10, t_rect.centerx, t_rect.top + 8, self.default_font, COLOR_TITLE)
+                else:
+                    pygame.draw.rect(self.screen, (40, 32, 54) if t_hover else (28, 22, 38), t_rect, border_radius=6)
+                    pygame.draw.rect(self.screen, COLOR_INFO if t_hover else (60, 52, 78), t_rect, 1, border_radius=6)
+                    draw_text(self.screen, t_name, 10, t_rect.centerx, t_rect.top + 8, self.default_font, COLOR_TEXT if t_hover else (150, 150, 170))
+
+            # --- TAB 0: MENU ---
+            if current_tab == 0:
+                btn_w, btn_h, btn_gap = 460, 46, 10
+                btn_x = modal_x + (modal_w - btn_w) // 2
+                start_btn_y = modal_y + 116
+
+                for idx, (btn_title, btn_desc, btn_color) in enumerate(menu_options):
+                    btn_rect = pygame.Rect(btn_x, start_btn_y + idx * (btn_h + btn_gap), btn_w, btn_h)
+                    hovered = btn_rect.collidepoint(mouse_pos)
+                    if hovered:
+                        selected_menu_idx = idx
+
+                    is_active = (selected_menu_idx == idx)
+                    bg_col = (62, 48, 82) if is_active else (32, 26, 44)
+                    border_col = btn_color if is_active else (65, 58, 85)
+                    border_thickness = 2 if is_active else 1
+
+                    pygame.draw.rect(self.screen, bg_col, btn_rect, border_radius=8)
+                    pygame.draw.rect(self.screen, border_col, btn_rect, border_thickness, border_radius=8)
+
+                    title_prefix = "> " if is_active else "  "
+                    title_suffix = " <" if is_active else ""
+                    draw_text(self.screen, f"{title_prefix}{btn_title}{title_suffix}", 12, btn_rect.centerx, btn_rect.top + 8, self.default_font, btn_color if is_active else COLOR_TEXT)
+                    draw_text(self.screen, btn_desc, 8, btn_rect.centerx, btn_rect.top + 28, self.small_font, (220, 220, 230) if is_active else (130, 130, 150))
+
+                    if hovered and mouse_clicked:
+                        if idx == 0:  # Resume
+                            menu_active = False
+                        elif idx == 1:  # Restart Level
+                            self.editing = False
+                            self._load_level(self.current_level_index, hard_reset=True)
+                            menu_active = False
+                        elif idx == 2:  # Level Select
+                            chosen = self.show_level_select_screen()
+                            if chosen is not None:
+                                self.editing = False
+                                self.current_level_index = chosen
+                                self._load_level(chosen, hard_reset=True)
+                                menu_active = False
+                            else:
+                                bg_snapshot = self.screen.copy()
+                        elif idx == 3:  # Audio Settings
+                            current_tab = 1
+                        elif idx == 4:  # Controls Guide
+                            current_tab = 2
+                        elif idx == 5:  # Quit to Title
+                            self.playing = False
+                            menu_active = False
+
+            # --- TAB 1: AUDIO SETTINGS ---
+            elif current_tab == 1:
+                start_audio_y = modal_y + 124
+                row_h = 56
+                row_gap = 10
+                row_w = modal_w - 70
+                row_x = modal_x + 35
+
+                for idx, k in enumerate(audio_keys):
+                    row_y = start_audio_y + idx * (row_h + row_gap)
+                    row_rect = pygame.Rect(row_x, row_y, row_w, row_h)
+                    
+                    is_row_selected = (selected_audio_idx == idx)
+                    pygame.draw.rect(self.screen, (32, 26, 42), row_rect, border_radius=8)
+                    pygame.draw.rect(self.screen, COLOR_TITLE if is_row_selected else (60, 52, 78), row_rect, 2 if is_row_selected else 1, border_radius=8)
+
+                    # Label
+                    label_str = audio_labels[k]
+                    draw_text(self.screen, label_str, 12, row_rect.left + 105, row_y + 19, self.default_font, COLOR_TITLE if is_row_selected else COLOR_TEXT)
+
+                    # Percentage
+                    pct_val = int(round(self.volumes[k] * 100))
+                    draw_text(self.screen, f"{pct_val}%", 12, row_rect.left + 235, row_y + 19, self.default_font, COLOR_WIN if pct_val > 0 else COLOR_LOSE)
+
+                    # Minus Button [-]
+                    minus_rect = pygame.Rect(row_rect.left + 270, row_y + 12, 34, 32)
+                    m_hover = minus_rect.collidepoint(mouse_pos)
+                    pygame.draw.rect(self.screen, (60, 48, 80) if m_hover else (42, 34, 56), minus_rect, border_radius=6)
+                    pygame.draw.rect(self.screen, COLOR_TITLE if m_hover else (80, 72, 100), minus_rect, 1, border_radius=6)
+                    draw_text(self.screen, "-", 14, minus_rect.centerx, minus_rect.top + 6, self.default_font, COLOR_TEXT)
+                    if m_hover and mouse_clicked:
+                        selected_audio_idx = idx
+                        self.volumes[k] = round(max(0.0, self.volumes[k] - 0.1), 2)
+                        self._apply_volumes()
+                        if self.sound_jump: self.sound_jump.play()
+
+                    # Slider Track
+                    track_rect = pygame.Rect(row_rect.left + 316, row_y + 18, 185, 20)
+                    t_hover = track_rect.collidepoint(mouse_pos)
+                    pygame.draw.rect(self.screen, (18, 14, 25), track_rect, border_radius=6)
+                    
+                    fill_w = int(track_rect.width * self.volumes[k])
+                    if fill_w > 0:
+                        fill_rect = pygame.Rect(track_rect.x, track_rect.y, fill_w, track_rect.height)
+                        pygame.draw.rect(self.screen, (70, 210, 180), fill_rect, border_radius=6)
+                    
+                    pygame.draw.rect(self.screen, (110, 100, 140) if t_hover else (65, 55, 85), track_rect, 1, border_radius=6)
+                    
+                    handle_x = track_rect.x + fill_w
+                    handle_rect = pygame.Rect(handle_x - 5, track_rect.y - 3, 10, track_rect.height + 6)
+                    pygame.draw.rect(self.screen, (255, 255, 255), handle_rect, border_radius=3)
+                    pygame.draw.rect(self.screen, COLOR_TITLE, handle_rect, 1, border_radius=3)
+
+                    # Slider Click & Drag
+                    if t_hover and mouse_clicked:
+                        selected_audio_idx = idx
+                        dragging_slider = k
+                        rel = (mouse_pos[0] - track_rect.x) / track_rect.width
+                        self.volumes[k] = round(max(0.0, min(1.0, rel)), 2)
+                        self._apply_volumes()
+                    if dragging_slider == k:
+                        rel = (mouse_pos[0] - track_rect.x) / track_rect.width
+                        self.volumes[k] = round(max(0.0, min(1.0, rel)), 2)
+                        self._apply_volumes()
+
+                    # Plus Button [+]
+                    plus_rect = pygame.Rect(row_rect.left + 512, row_y + 12, 34, 32)
+                    p_hover = plus_rect.collidepoint(mouse_pos)
+                    pygame.draw.rect(self.screen, (60, 48, 80) if p_hover else (42, 34, 56), plus_rect, border_radius=6)
+                    pygame.draw.rect(self.screen, COLOR_TITLE if p_hover else (80, 72, 100), plus_rect, 1, border_radius=6)
+                    draw_text(self.screen, "+", 14, plus_rect.centerx, plus_rect.top + 6, self.default_font, COLOR_TEXT)
+                    if p_hover and mouse_clicked:
+                        selected_audio_idx = idx
+                        self.volumes[k] = round(min(1.0, self.volumes[k] + 0.1), 2)
+                        self._apply_volumes()
+                        if self.sound_jump: self.sound_jump.play()
+
+                # Action Buttons inside Audio tab
+                btn_audio_y = start_audio_y + 3 * (row_h + row_gap) + 12
+                test_rect = pygame.Rect(modal_x + 50, btn_audio_y, 250, 40)
+                test_hover = test_rect.collidepoint(mouse_pos)
+                if test_hover: selected_audio_idx = 3
+                is_test_sel = (selected_audio_idx == 3)
+                pygame.draw.rect(self.screen, (62, 48, 82) if is_test_sel else (32, 26, 44), test_rect, border_radius=8)
+                pygame.draw.rect(self.screen, COLOR_INFO if is_test_sel else (65, 58, 85), test_rect, 2 if is_test_sel else 1, border_radius=8)
+                draw_text(self.screen, "TEST SOUND (SFX)", 10, test_rect.centerx, test_rect.top + 13, self.default_font, COLOR_INFO if is_test_sel else COLOR_TEXT)
+                if test_hover and mouse_clicked:
+                    if self.sound_jump: self.sound_jump.play()
+
+                reset_rect = pygame.Rect(modal_x + 340, btn_audio_y, 250, 40)
+                reset_hover = reset_rect.collidepoint(mouse_pos)
+                if reset_hover: selected_audio_idx = 4
+                is_reset_sel = (selected_audio_idx == 4)
+                pygame.draw.rect(self.screen, (62, 48, 82) if is_reset_sel else (32, 26, 44), reset_rect, border_radius=8)
+                pygame.draw.rect(self.screen, COLOR_TITLE if is_reset_sel else (65, 58, 85), reset_rect, 2 if is_reset_sel else 1, border_radius=8)
+                draw_text(self.screen, "RESET DEFAULTS", 10, reset_rect.centerx, reset_rect.top + 13, self.default_font, COLOR_TITLE if is_reset_sel else COLOR_TEXT)
+                if reset_hover and mouse_clicked:
+                    self.volumes = {'Master': 1.0, 'SFX': 1.0, 'Music': 0.3}
+                    self._apply_volumes()
+                    if self.sound_jump: self.sound_jump.play()
+
+                # Bottom Return Button
+                done_rect = pygame.Rect(modal_x + 180, btn_audio_y + 54, 280, 42)
+                done_hover = done_rect.collidepoint(mouse_pos)
+                if done_hover: selected_audio_idx = 5
+                is_done_sel = (selected_audio_idx == 5)
+                pygame.draw.rect(self.screen, (65, 52, 88) if is_done_sel else (35, 28, 48), done_rect, border_radius=8)
+                pygame.draw.rect(self.screen, COLOR_WIN if is_done_sel else (75, 68, 95), done_rect, 2 if is_done_sel else 1, border_radius=8)
+                draw_text(self.screen, "APPLY & RESUME GAME", 12, done_rect.centerx, done_rect.top + 13, self.default_font, COLOR_WIN if is_done_sel else COLOR_TEXT)
+                if done_hover and mouse_clicked:
+                    menu_active = False
+
+            # --- TAB 2: CONTROLS ---
+            elif current_tab == 2:
+                card_y = modal_y + 116
+                card_w = 275
+                card_h = 270
+
+                # Left Card: Player Controls
+                left_card = pygame.Rect(modal_x + 35, card_y, card_w, card_h)
+                pygame.draw.rect(self.screen, (30, 24, 40), left_card, border_radius=8)
+                pygame.draw.rect(self.screen, (65, 55, 85), left_card, 1, border_radius=8)
+                draw_text(self.screen, "PLAYER CONTROLS", 12, left_card.centerx, left_card.top + 12, self.default_font, COLOR_TITLE)
+                pygame.draw.line(self.screen, (55, 48, 72), (left_card.left + 15, left_card.top + 34), (left_card.right - 15, left_card.top + 34))
+
+                player_ctrls = [
+                    ("Move Left/Right", "A / D or Arrows"),
+                    ("Jump", "Space / W / Up"),
+                    ("Dodge Roll", "Left Shift"),
+                    ("Coyote Jump", "100ms Grace Period"),
+                    ("Jump Buffer", "150ms Pre-Landing"),
+                    ("Goal", "Touch Gold Trophy")
+                ]
+                for c_i, (action, bind) in enumerate(player_ctrls):
+                    draw_text(self.screen, action + ":", 8, left_card.left + 65, left_card.top + 50 + c_i * 34, self.small_font, COLOR_INFO)
+                    draw_text(self.screen, bind, 10, left_card.left + 185, left_card.top + 48 + c_i * 34, self.default_font, COLOR_WIN)
+
+                # Right Card: Editor Controls
+                right_card = pygame.Rect(modal_x + 330, card_y, card_w, card_h)
+                pygame.draw.rect(self.screen, (30, 24, 40), right_card, border_radius=8)
+                pygame.draw.rect(self.screen, (65, 55, 85), right_card, 1, border_radius=8)
+                draw_text(self.screen, "LEVEL EDITOR CONTROLS", 12, right_card.centerx, right_card.top + 12, self.default_font, COLOR_WIN)
+                pygame.draw.line(self.screen, (55, 48, 72), (right_card.left + 15, right_card.top + 34), (right_card.right - 15, right_card.top + 34))
+
+                editor_ctrls = [
+                    ("Toggle Edit Mode", "Key E"),
+                    ("Place Block", "Left Click"),
+                    ("Remove Block", "Right Click"),
+                    ("Palette Types", "Keys 1, 2, 3, 4"),
+                    ("Undo Last Edit", "Key Z"),
+                    ("Hard Reset Level", "Key R")
+                ]
+                for c_i, (action, bind) in enumerate(editor_ctrls):
+                    draw_text(self.screen, action + ":", 8, right_card.left + 65, right_card.top + 50 + c_i * 34, self.small_font, COLOR_INFO)
+                    draw_text(self.screen, bind, 10, right_card.left + 185, right_card.top + 48 + c_i * 34, self.default_font, COLOR_TITLE)
+
+                # Bottom Return Button
+                ctrl_done_rect = pygame.Rect(modal_x + 180, card_y + card_h + 18, 280, 42)
+                ctrl_done_hover = ctrl_done_rect.collidepoint(mouse_pos)
+                pygame.draw.rect(self.screen, (65, 52, 88) if ctrl_done_hover else (35, 28, 48), ctrl_done_rect, border_radius=8)
+                pygame.draw.rect(self.screen, COLOR_WIN if ctrl_done_hover else (75, 68, 95), ctrl_done_rect, 2 if ctrl_done_hover else 1, border_radius=8)
+                draw_text(self.screen, "BACK TO GAME", 12, ctrl_done_rect.centerx, ctrl_done_rect.top + 13, self.default_font, COLOR_WIN if ctrl_done_hover else COLOR_TEXT)
+                if ctrl_done_hover and mouse_clicked:
+                    menu_active = False
+
+            # Footer
+            draw_text(self.screen, "Click any option or use WASD / Arrow Keys + ENTER  |  ESC to Resume", 8, SCREEN_WIDTH // 2, modal_rect.bottom - 22, self.small_font, (160, 160, 185))
+
+            pygame.display.flip()
+
     def show_level_select_screen(self):
         """Displays a retro Level Select menu with a visual grid of level cards."""
         if not self.running: return None
 
-        LEVEL_NAMES = [
-            "Awakening", "Bloom", "Hazards", "Climb", "Ice Intro",
-            "Labyrinth", "Dodge Test", "Slide Run", "Gauntlet", "Ice Finale",
-            "Islands", "Hazard Maze", "Ice Cavern", "Pillars", "Dunes",
-            "Split Paths", "Ice & Fire", "Fortress", "Precision", "Citadel"
-        ]
         total = len(levels.LEVELS)
         selected = self.current_level_index if (0 <= self.current_level_index < total) else 0
 
@@ -517,7 +973,7 @@ class Game:
         grid_w = cols * card_w + (cols - 1) * gap_x
         grid_h = rows * card_h + (rows - 1) * gap_y
         start_x = (SCREEN_WIDTH - grid_w) // 2
-        start_y = (SCREEN_HEIGHT - grid_h) // 2 + 25
+        start_y = (SCREEN_HEIGHT - grid_h) // 2 + 10
 
         menu_active = True
 
@@ -559,8 +1015,8 @@ class Game:
                 self.screen.fill(COLOR_BG)
 
             # Header
-            draw_text(self.screen, "LEVEL SELECT", 26, SCREEN_WIDTH / 2, 45, self.title_font, COLOR_TITLE)
-            draw_text(self.screen, "DEVELOPER / TESTING PORTAL", 10, SCREEN_WIDTH / 2, 80, self.default_font, COLOR_INFO)
+            draw_text(self.screen, "LEVEL SELECT", 26, SCREEN_WIDTH / 2, 35, self.title_font, COLOR_TITLE)
+            draw_text(self.screen, "DEVELOPER / TESTING PORTAL", 10, SCREEN_WIDTH / 2, 68, self.default_font, COLOR_INFO)
 
             # Draw Level Cards
             for idx in range(total):
@@ -596,8 +1052,14 @@ class Game:
                 name_color = COLOR_TITLE if is_selected else COLOR_INFO
                 draw_text(self.screen, name_str, 8, card_rect.centerx, card_rect.top + 42, self.small_font, name_color)
 
-            # Footer
-            draw_text(self.screen, "Click Level or Navigate with Arrows / WASD + Enter  |  ESC: Back", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 35, self.small_font, COLOR_TEXT)
+            # Clickable Back button
+            back_btn_rect = pygame.Rect(SCREEN_WIDTH // 2 - 110, SCREEN_HEIGHT - 45, 220, 30)
+            b_hover = back_btn_rect.collidepoint(mouse_pos)
+            pygame.draw.rect(self.screen, (55, 42, 75) if b_hover else (32, 26, 42), back_btn_rect, border_radius=6)
+            pygame.draw.rect(self.screen, COLOR_TITLE if b_hover else (75, 68, 95), back_btn_rect, 1, border_radius=6)
+            draw_text(self.screen, "< BACK TO MENU (ESC)", 10, back_btn_rect.centerx, back_btn_rect.top + 8, self.default_font, COLOR_TITLE if b_hover else COLOR_TEXT)
+            if b_hover and mouse_clicked:
+                return None
 
             pygame.display.flip()
 
@@ -635,10 +1097,10 @@ class Game:
             # Edit Mode Section
             draw_text(self.screen, "--- LEVEL EDITOR & DEV ---", 16, SCREEN_WIDTH / 2, start_y + 115, self.default_font, COLOR_TEXT)
             draw_text(self.screen, "Press 'E' in-game to pause and edit levels!", 12, SCREEN_WIDTH / 2, start_y + 145, self.default_font, COLOR_WIN)
-            draw_text(self.screen, "Press 'L' anytime for Level Select (Dev Menu)", 12, SCREEN_WIDTH / 2, start_y + 170, self.default_font, COLOR_TITLE)
+            draw_text(self.screen, "Press 'ESC' anytime for Pause Menu (Settings/Levels)", 12, SCREEN_WIDTH / 2, start_y + 170, self.default_font, COLOR_TITLE)
 
             # Bottom prompts
-            draw_text(self.screen, "Press SPACE / ENTER to Start  |  Press 'L' for Level Select", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 3 / 4 + 40, self.default_font, COLOR_TEXT)
+            draw_text(self.screen, "Press SPACE / ENTER to Start", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 3 / 4 + 40, self.default_font, COLOR_TEXT)
             draw_text(self.screen, f"Current Mode: {self.game_mode.upper()} | (ESC to Quit)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 30, self.small_font, COLOR_INFO)
 
             pygame.display.flip()

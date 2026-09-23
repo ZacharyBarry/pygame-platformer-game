@@ -1,6 +1,7 @@
 # sprites.py
 import pygame
 import math
+import random
 from constants import (TILE_SIZE, PLAYER_JUMP_STRENGTH, PLAYER_GRAVITY,
                      PLAYER_MOVE_SPEED, # Using this for ground AND air now (unless on ice)
                      PLAYER_ACC, PLAYER_FRICTION, # Primarily for ICE now
@@ -9,11 +10,13 @@ from constants import (TILE_SIZE, PLAYER_JUMP_STRENGTH, PLAYER_GRAVITY,
                      PLAYER_MAX_HEALTH, # <-- Added
                      PLAYER_ANIMATION_SPEED, IMG_PLAYER_IDLE, IMG_PLAYER_WALK,
                      IMG_PLAYER_DODGE, IMG_PLAYER_HIT, IMG_PLAYER_DEATH,
-                     IMG_PLAYER_JUMP, COLOR_LOSE, COLOR_INFO, COLOR_WIN,
+                     IMG_PLAYER_JUMP, COLOR_LOSE, COLOR_INFO, COLOR_WIN, COLOR_TITLE,
                      HAZARD_FLASH_SPEED, SCREEN_WIDTH, SCREEN_HEIGHT,
                      IMG_ENEMY_CRAWLER, IMG_ENEMY_CRAWLER_SQUASH, IMG_ENEMY_FLYER,
                      ENEMY_ANIMATION_SPEED, CRAWLER_SPEED, FLYER_SPEED,
-                     FLYER_WAVE_AMPLITUDE, FLYER_WAVE_FREQ)
+                     FLYER_WAVE_AMPLITUDE, FLYER_WAVE_FREQ,
+                     COYOTE_TIME, JUMP_BUFFER_TIME, PLAYER_ICE_ACC, 
+                     PLAYER_ICE_FRICTION, PLAYER_MAX_FALL_SPEED)
 # Import asset loader
 from assets import load_image
 
@@ -60,6 +63,8 @@ class Player(pygame.sprite.Sprite):
         self.current_frame_idx = 0
         self.last_anim_update = pygame.time.get_ticks()
         self.state_timer = 0
+        self.last_ground_time = 0
+        self.last_jump_pressed_time = 0
 
     def load_animations(self):
         # Load right-facing frames first
@@ -89,12 +94,31 @@ class Player(pygame.sprite.Sprite):
         self.jump_frame_left = pygame.transform.flip(self.jump_frame_right, True, False) if self.jump_frame_right else None
 
     def jump(self):
-        if self.state in ['idle', 'walking'] and self.on_ground:
-            self.vel.y = PLAYER_JUMP_STRENGTH
-            self.on_ground = False
-            self.on_ice = False # Cannot be on ice while jumping
-            self.set_state('jumping')
-            if self.game.sound_jump: self.game.sound_jump.play()
+        self.last_jump_pressed_time = pygame.time.get_ticks()
+        now = pygame.time.get_ticks()
+        
+        # Coyote time check
+        can_jump = self.on_ground or (now - self.last_ground_time <= COYOTE_TIME)
+        if self.state in ['idle', 'walking', 'jumping'] and can_jump:
+            self.execute_jump()
+            
+    def execute_jump(self):
+        self.vel.y = PLAYER_JUMP_STRENGTH
+        self.on_ground = False
+        self.on_ice = False
+        self.last_ground_time = 0 # Prevent double jumping
+        self.last_jump_pressed_time = 0 # Consume buffer
+        self.set_state('jumping')
+        
+        # Emit dust particles
+        if hasattr(self, 'groups') and self.groups():
+            for _ in range(5):
+                px = self.rect.centerx + random.randint(-4, 4)
+                py = self.rect.bottom
+                dust = Particle(px, py, (200, 200, 200), random.uniform(-1, 1), random.uniform(-0.5, 0), 300, size=2)
+                self.groups()[0].add(dust)
+                
+        if self.game.sound_jump: self.game.sound_jump.play()
 
     def dodge(self):
         if self.state in ['idle', 'walking'] and self.on_ground:
@@ -109,6 +133,9 @@ class Player(pygame.sprite.Sprite):
 
         if self.game.sound_hit:
             self.game.sound_hit.play()
+            
+        if hasattr(self.game, 'add_shake'):
+            self.game.add_shake(8)
 
         self.health -= 1
         print(f"Player Hit! Health: {self.health}/{self.max_health}")  # Debug
@@ -189,21 +216,17 @@ class Player(pygame.sprite.Sprite):
                 # 1. Determine acceleration ONLY from player input keys
                 input_acc_x = 0
                 if moving_left:
-                    input_acc_x = -PLAYER_ACC  # Apply acceleration left
+                    input_acc_x = -PLAYER_ICE_ACC  # Apply acceleration left
                     self.facing_right = False
                 elif moving_right:
-                    input_acc_x = PLAYER_ACC  # Apply acceleration right
+                    input_acc_x = PLAYER_ICE_ACC  # Apply acceleration right
                     self.facing_right = True
 
                 # 2. Calculate friction force (always opposes current velocity)
-                #    PLAYER_FRICTION should be a SMALL negative value (e.g., -0.05 to -0.15)
-                #    A smaller magnitude means less friction / more slide.
-                friction_force_x = self.vel.x * PLAYER_FRICTION
+                friction_force_x = self.vel.x * PLAYER_ICE_FRICTION
 
                 # 3. Combine forces: Apply input acceleration AND friction
-                #    The input will gradually overcome friction and existing velocity.
                 self.acc.x = input_acc_x + friction_force_x
-                # print(f"ICE: vel.x={self.vel.x:.2f}, input_acc={input_acc_x:.2f}, fric={friction_force_x:.2f}, total_acc={self.acc.x:.2f}") # Debug
 
             else:  # --- NORMAL GROUND or AIR PHYSICS ---
                 # Use constant speed control, directly setting velocity
@@ -216,8 +239,12 @@ class Player(pygame.sprite.Sprite):
                     self.facing_right = True
 
                 self.vel.x = target_vel_x
-                # No horizontal acceleration needed here (acc.x remains 0 from start of update)
-                # print(f"NON-ICE: vel.x={self.vel.x:.2f}") # Debug
+                
+            # Variable jump height
+            if self.vel.y < 0:
+                if not (keys[pygame.K_SPACE] or keys[pygame.K_UP] or keys[pygame.K_w]):
+                    if self.vel.y < PLAYER_JUMP_STRENGTH / 3:
+                        self.vel.y = PLAYER_JUMP_STRENGTH / 3
 
         # =========================================================== #
         # <<< END OF CORRECTED ICE MOVEMENT LOGIC >>>                 #
@@ -229,8 +256,7 @@ class Player(pygame.sprite.Sprite):
             self.vel += self.acc
 
             # Limit fall speed
-            MAX_Y_VEL = 15;
-            self.vel.y = min(self.vel.y, MAX_Y_VEL)
+            self.vel.y = min(self.vel.y, PLAYER_MAX_FALL_SPEED)
 
             # --- Move & Collide X ---
             self.pos.x += self.vel.x
@@ -244,11 +270,26 @@ class Player(pygame.sprite.Sprite):
             self.pos.y += self.vel.y + 0.5 * self.acc.y
             self.hitbox.bottom = round(self.pos.y)
             self.rect.bottom = self.hitbox.bottom
-            self.on_ground = False;
+            was_on_ground = self.on_ground
+            self.on_ground = False
             self.on_ice = False  # Reset before check
             self.check_collisions('y')
             self.pos.y = self.hitbox.bottom
             self.rect.bottom = self.hitbox.bottom
+            
+            # Ground tracking & jump buffering
+            if self.on_ground:
+                if not was_on_ground:
+                    # Just landed!
+                    if hasattr(self, 'groups') and self.groups():
+                        for _ in range(8):
+                            px = self.rect.centerx + random.randint(-8, 8)
+                            py = self.rect.bottom
+                            dust = Particle(px, py, (200, 200, 200), random.uniform(-2, 2), random.uniform(-1, 0), 400, size=2)
+                            self.groups()[0].add(dust)
+                self.last_ground_time = now
+                if now - self.last_jump_pressed_time <= JUMP_BUFFER_TIME:
+                    self.execute_jump()
 
             # --- Update State (if not dodging/hit/dying) ---
             if self.state not in ['dodging', 'hit', 'dying']:
@@ -320,6 +361,10 @@ class Player(pygame.sprite.Sprite):
                         enemy.stomp()
                         self.vel.y = PLAYER_JUMP_STRENGTH * 0.75 # High bounce
                         self.on_ground = False
+                        
+                        if hasattr(self.game, 'add_shake'):
+                            self.game.add_shake(5)
+                            
                         if self.game.sound_hit:
                             self.game.sound_hit.play()
                         break
@@ -429,6 +474,24 @@ class Hazard(pygame.sprite.Sprite):
                 self.current_image_idx = (self.current_image_idx + 1) % len(self.images)
                 self.image = self.images[self.current_image_idx]
 
+class Particle(pygame.sprite.Sprite):
+    """Simple particle effect for dust, sparks, etc."""
+    def __init__(self, x, y, color, vel_x, vel_y, lifetime, size=3):
+        super().__init__()
+        self.image = pygame.Surface((size, size))
+        self.image.fill(color)
+        self.rect = self.image.get_rect(center=(x, y))
+        self.pos = pygame.math.Vector2(x, y)
+        self.vel = pygame.math.Vector2(vel_x, vel_y)
+        self.lifetime = lifetime
+        self.spawn_time = pygame.time.get_ticks()
+
+    def update(self):
+        self.pos += self.vel
+        self.rect.center = round(self.pos.x), round(self.pos.y)
+        if pygame.time.get_ticks() - self.spawn_time > self.lifetime:
+            self.kill()
+
 class Goal(pygame.sprite.Sprite):
     """Represents the goal tile."""
     def __init__(self, x, y, image):
@@ -437,7 +500,28 @@ class Goal(pygame.sprite.Sprite):
         if self.image is None:
              print(f"Warning: Goal created with no image at ({x},{y}). Using fallback.")
              self.image = pygame.Surface((TILE_SIZE, TILE_SIZE)); self.image.fill(COLOR_WIN)
+        self.base_image = self.image.copy()
         self.rect = self.image.get_rect(topleft=(x, y))
+        self.pulse_time = 0
+
+    def update(self):
+        """Pulsating effect for the goal to make it stand out."""
+        self.pulse_time += 0.05
+        pulse = (math.sin(self.pulse_time) + 1) / 2 # 0 to 1
+        
+        # Create a bright glow overlay
+        glow = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+        glow.fill((255, 255, 255, int(100 * pulse)))
+        
+        self.image = self.base_image.copy()
+        self.image.blit(glow, (0, 0))
+        
+        # Occasionally emit a spark particle
+        if random.random() < 0.1 and hasattr(self, 'groups') and self.groups():
+            px = self.rect.centerx + random.randint(-5, 5)
+            py = self.rect.bottom - random.randint(0, 10)
+            spark = Particle(px, py, COLOR_TITLE, 0, -1, 500, size=2)
+            self.groups()[0].add(spark) # Add to same group as Goal
 
 
 # --- Enemy Classes ---
@@ -454,6 +538,12 @@ class Enemy(pygame.sprite.Sprite):
 
     def stomp(self):
         """Called when player stomps on the enemy."""
+        if hasattr(self, 'groups') and self.groups():
+            for _ in range(15):
+                px = self.rect.centerx + random.randint(-10, 10)
+                py = self.rect.centery + random.randint(-10, 10)
+                dust = Particle(px, py, (255, 150, 50), random.uniform(-3, 3), random.uniform(-3, 3), 300, size=3)
+                self.groups()[0].add(dust)
         self.kill()
 
     def update(self):
@@ -659,3 +749,95 @@ class FlyerEnemy(Enemy):
                     pass
                 elif not player.invincible:
                     player.take_hit()
+
+class Laser(pygame.sprite.Sprite):
+    def __init__(self, game, x, y, direction):
+        super().__init__()
+        self.game = game
+        self.image = pygame.Surface((20, 8))
+        self.image.fill((255, 50, 50))
+        self.rect = self.image.get_rect(center=(x, y))
+        self.vel_x = direction * 5
+        self.lifetime = 3000
+        self.spawn_time = pygame.time.get_ticks()
+        
+    def update(self):
+        self.rect.x += self.vel_x
+        if pygame.time.get_ticks() - self.spawn_time > self.lifetime:
+            self.kill()
+        
+        hits = [p for p in self.game.platforms if self.rect.colliderect(p.rect)]
+        if hits:
+            if hasattr(self, 'groups') and self.groups():
+                for _ in range(5):
+                    px = self.rect.centerx
+                    py = self.rect.centery
+                    spark = Particle(px, py, (255, 50, 50), random.uniform(-2, 2), random.uniform(-2, 2), 200, size=2)
+                    self.groups()[0].add(spark)
+            self.kill()
+            return
+            
+        player = self.game.player
+        if player and player.alive() and player.state not in ['hit', 'dying', 'dodging']:
+            if self.rect.colliderect(player.hitbox):
+                if not player.invincible:
+                    player.take_hit()
+                self.kill()
+
+class BossEnemy(Enemy):
+    def __init__(self, game, x, y):
+        super().__init__(game, x, y)
+        self.image = pygame.Surface((TILE_SIZE * 3, TILE_SIZE * 3))
+        self.image.fill((150, 40, 200))
+        pygame.draw.rect(self.image, (255, 255, 255), (8, 8, 12, 12))
+        pygame.draw.rect(self.image, (255, 255, 255), (TILE_SIZE*3 - 20, 8, 12, 12))
+        self.rect = self.image.get_rect(bottomleft=(x, y + TILE_SIZE))
+        self.hp = 5
+        self.state = 'idle'
+        self.last_attack = pygame.time.get_ticks()
+        self.direction = -1
+
+    def stomp(self):
+        self.hp -= 1
+        if hasattr(self.game, 'add_shake'):
+            self.game.add_shake(15)
+            
+        if self.game.sound_hit:
+            self.game.sound_hit.play()
+            
+        if self.hp <= 0:
+            if hasattr(self, 'groups') and self.groups():
+                for _ in range(50):
+                    px = self.rect.centerx + random.randint(-20, 20)
+                    py = self.rect.centery + random.randint(-20, 20)
+                    dust = Particle(px, py, (150, 40, 200), random.uniform(-5, 5), random.uniform(-5, 5), 800, size=4)
+                    self.groups()[0].add(dust)
+            self.kill()
+            
+    def update(self):
+        now = pygame.time.get_ticks()
+        player = self.game.player
+        
+        if player and player.alive():
+            if player.rect.centerx < self.rect.centerx:
+                self.direction = -1
+            else:
+                self.direction = 1
+                
+        self.rect.y += int(math.sin(now / 200.0) * 2)
+                
+        if now - self.last_attack > 1500:
+            self.last_attack = now
+            if hasattr(self, 'groups') and self.groups():
+                laser = Laser(self.game, self.rect.centerx, self.rect.centery, self.direction)
+                self.groups()[0].add(laser)
+
+class TooltipTile(pygame.sprite.Sprite):
+    def __init__(self, x, y, text):
+        super().__init__()
+        self.image = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+        font = pygame.font.Font(None, 24)
+        txt = font.render("?", True, (255, 255, 0))
+        self.image.blit(txt, (TILE_SIZE//2 - txt.get_width()//2, TILE_SIZE//2 - txt.get_height()//2))
+        self.rect = self.image.get_rect(topleft=(x, y))
+        self.text = text
