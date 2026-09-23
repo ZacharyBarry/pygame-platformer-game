@@ -1,5 +1,6 @@
 # sprites.py
 import pygame
+import math
 from constants import (TILE_SIZE, PLAYER_JUMP_STRENGTH, PLAYER_GRAVITY,
                      PLAYER_MOVE_SPEED, # Using this for ground AND air now (unless on ice)
                      PLAYER_ACC, PLAYER_FRICTION, # Primarily for ICE now
@@ -9,7 +10,10 @@ from constants import (TILE_SIZE, PLAYER_JUMP_STRENGTH, PLAYER_GRAVITY,
                      PLAYER_ANIMATION_SPEED, IMG_PLAYER_IDLE, IMG_PLAYER_WALK,
                      IMG_PLAYER_DODGE, IMG_PLAYER_HIT, IMG_PLAYER_DEATH,
                      IMG_PLAYER_JUMP, COLOR_LOSE, COLOR_INFO, COLOR_WIN,
-                     HAZARD_FLASH_SPEED, SCREEN_WIDTH, SCREEN_HEIGHT)
+                     HAZARD_FLASH_SPEED, SCREEN_WIDTH, SCREEN_HEIGHT,
+                     IMG_ENEMY_CRAWLER, IMG_ENEMY_CRAWLER_SQUASH, IMG_ENEMY_FLYER,
+                     ENEMY_ANIMATION_SPEED, CRAWLER_SPEED, FLYER_SPEED,
+                     FLYER_WAVE_AMPLITUDE, FLYER_WAVE_FREQ)
 # Import asset loader
 from assets import load_image
 
@@ -305,6 +309,27 @@ class Player(pygame.sprite.Sprite):
                 elif any(self.hitbox.colliderect(g.rect) for g in self.game.goals):
                     self.game.level_complete()
 
+        # Enemy collisions (check for both x and y movement)
+        if self.state not in ['hit', 'dying'] and hasattr(self.game, 'enemies'):
+            for enemy in list(self.game.enemies):
+                if not getattr(enemy, 'alive', True) or getattr(enemy, 'squashed', False):
+                    continue
+                if self.hitbox.colliderect(enemy.rect):
+                    # Stomp condition: player is falling downwards and player's feet touch enemy top
+                    if self.vel.y > 0 and self.hitbox.bottom <= enemy.rect.top + 10:
+                        enemy.stomp()
+                        self.vel.y = PLAYER_JUMP_STRENGTH * 0.75 # High bounce
+                        self.on_ground = False
+                        if self.game.sound_hit:
+                            self.game.sound_hit.play()
+                        break
+                    elif self.state == 'dodging':
+                        # Rolling/dodging grants immunity through enemies
+                        pass
+                    elif not self.invincible:
+                        self.take_hit()
+                        break
+
 
     def _animate(self):
         """Updates the player's image based on state, direction, and visibility."""
@@ -413,3 +438,224 @@ class Goal(pygame.sprite.Sprite):
              print(f"Warning: Goal created with no image at ({x},{y}). Using fallback.")
              self.image = pygame.Surface((TILE_SIZE, TILE_SIZE)); self.image.fill(COLOR_WIN)
         self.rect = self.image.get_rect(topleft=(x, y))
+
+
+# --- Enemy Classes ---
+class Enemy(pygame.sprite.Sprite):
+    """Base class for all enemy types."""
+    def __init__(self, game, x, y):
+        super().__init__()
+        self.game = game
+        self.alive = True
+        self.squashed = False
+        self.squash_timer = 0
+        self.image = None
+        self.rect = pygame.Rect(x, y, TILE_SIZE, TILE_SIZE)
+
+    def stomp(self):
+        """Called when player stomps on the enemy."""
+        self.kill()
+
+    def update(self):
+        pass
+
+
+class CrawlerEnemy(Enemy):
+    """Ground patrol enemy ('Goomba' style). Uses gravity, walks, reverses at walls."""
+    def __init__(self, game, x, y, speed=CRAWLER_SPEED):
+        super().__init__(game, x, y)
+        self.speed = speed
+        self.direction = -1 # -1 for left, 1 for right
+        self.vel = pygame.math.Vector2(self.direction * self.speed, 0)
+        self.pos = pygame.math.Vector2(x + TILE_SIZE // 2, y + TILE_SIZE)
+
+        frames = [load_image(f) for f in IMG_ENEMY_CRAWLER]
+        self.walk_frames = [f for f in frames if f]
+        if not self.walk_frames:
+            fallback = pygame.Surface((TILE_SIZE, TILE_SIZE))
+            fallback.fill((180, 50, 40))
+            self.walk_frames = [fallback]
+
+        squash_img = load_image(IMG_ENEMY_CRAWLER_SQUASH)
+        if squash_img:
+            self.squash_frame = squash_img
+        else:
+            fb_sq = pygame.Surface((TILE_SIZE, TILE_SIZE // 2))
+            fb_sq.fill((180, 50, 40))
+            self.squash_frame = fb_sq
+
+        self.current_frame = 0
+        self.last_anim_time = pygame.time.get_ticks()
+        self.image = self.walk_frames[0]
+        self.rect = self.image.get_rect(bottomleft=(x, y + TILE_SIZE))
+
+    def stomp(self):
+        if not self.squashed:
+            self.squashed = True
+            self.image = self.squash_frame
+            old_bottom = self.rect.bottom
+            self.rect = self.image.get_rect(midbottom=(self.rect.centerx, old_bottom))
+            self.squash_timer = pygame.time.get_ticks()
+            self.vel.x = 0
+            self.vel.y = 0
+
+    def update(self):
+        now = pygame.time.get_ticks()
+
+        # Handle squashed timer
+        if self.squashed:
+            if now - self.squash_timer > 300:
+                self.kill()
+            return
+
+        # Animate walking
+        if now - self.last_anim_time > ENEMY_ANIMATION_SPEED:
+            self.last_anim_time = now
+            self.current_frame = (self.current_frame + 1) % len(self.walk_frames)
+            frame = self.walk_frames[self.current_frame]
+            if self.direction > 0:
+                self.image = pygame.transform.flip(frame, True, False)
+            else:
+                self.image = frame
+
+        # Apply gravity
+        self.vel.y = min(self.vel.y + PLAYER_GRAVITY, 10)
+
+        # Horizontal movement
+        self.vel.x = self.direction * self.speed
+        self.pos.x += self.vel.x
+        self.rect.centerx = round(self.pos.x)
+
+        # Horizontal collision with platforms
+        hits_x = [p for p in self.game.platforms if self.rect.colliderect(p.rect)]
+        if hits_x:
+            for platform in hits_x:
+                if self.direction > 0:
+                    self.rect.right = platform.rect.left
+                    self.pos.x = self.rect.centerx
+                    self.direction = -1
+                    break
+                elif self.direction < 0:
+                    self.rect.left = platform.rect.right
+                    self.pos.x = self.rect.centerx
+                    self.direction = 1
+                    break
+
+        # Screen boundary bounce
+        if self.rect.left <= self.game.level_offset_x:
+            self.rect.left = self.game.level_offset_x
+            self.pos.x = self.rect.centerx
+            self.direction = 1
+        elif self.rect.right >= SCREEN_WIDTH - self.game.level_offset_x:
+            self.rect.right = SCREEN_WIDTH - self.game.level_offset_x
+            self.pos.x = self.rect.centerx
+            self.direction = -1
+
+        # Vertical movement
+        self.pos.y += self.vel.y
+        self.rect.bottom = round(self.pos.y)
+
+        # Vertical collision with platforms
+        hits_y = [p for p in self.game.platforms if self.rect.colliderect(p.rect)]
+        for platform in hits_y:
+            if self.vel.y > 0:
+                self.rect.bottom = platform.rect.top
+                self.pos.y = self.rect.bottom
+                self.vel.y = 0
+            elif self.vel.y < 0:
+                self.rect.top = platform.rect.bottom
+                self.pos.y = self.rect.bottom
+                self.vel.y = 0
+
+        # Collision with active player
+        player = self.game.player
+        if player and player.alive() and player.state not in ['hit', 'dying']:
+            if self.rect.colliderect(player.hitbox):
+                if player.vel.y > 0 and player.hitbox.bottom <= self.rect.top + 10:
+                    self.stomp()
+                    player.vel.y = PLAYER_JUMP_STRENGTH * 0.75
+                    player.on_ground = False
+                    if self.game.sound_hit:
+                        self.game.sound_hit.play()
+                elif player.state == 'dodging':
+                    pass
+                elif not player.invincible:
+                    player.take_hit()
+
+
+class FlyerEnemy(Enemy):
+    """Airborne enemy ('Bat' style). Hovers with wave motion, patrols horizontal air path."""
+    def __init__(self, game, x, y, patrol_range=70, speed=FLYER_SPEED):
+        super().__init__(game, x, y)
+        self.speed = speed
+        self.direction = -1
+        self.start_x = x
+        self.start_y = y
+        self.patrol_range = patrol_range
+        self.pos_x = float(x)
+        self.angle = float((x * 13) % 360) # Randomize initial phase per enemy
+
+        frames = [load_image(f) for f in IMG_ENEMY_FLYER]
+        self.fly_frames = [f for f in frames if f]
+        if not self.fly_frames:
+            fallback = pygame.Surface((TILE_SIZE, TILE_SIZE))
+            fallback.fill((100, 50, 140))
+            self.fly_frames = [fallback]
+
+        self.current_frame = 0
+        self.last_anim_time = pygame.time.get_ticks()
+        self.image = self.fly_frames[0]
+        self.rect = self.image.get_rect(topleft=(x, y))
+
+    def stomp(self):
+        """Defeat flying enemy immediately when stomped."""
+        self.kill()
+
+    def update(self):
+        now = pygame.time.get_ticks()
+
+        # Flapping animation
+        if now - self.last_anim_time > ENEMY_ANIMATION_SPEED:
+            self.last_anim_time = now
+            self.current_frame = (self.current_frame + 1) % len(self.fly_frames)
+            frame = self.fly_frames[self.current_frame]
+            if self.direction > 0:
+                self.image = pygame.transform.flip(frame, True, False)
+            else:
+                self.image = frame
+
+        # Hover wave
+        self.angle += FLYER_WAVE_FREQ
+        wave_offset = math.sin(self.angle) * FLYER_WAVE_AMPLITUDE
+
+        # Horizontal movement
+        self.pos_x += self.direction * self.speed
+        self.rect.x = round(self.pos_x)
+        self.rect.y = round(self.start_y + wave_offset)
+
+        # Reversal at patrol boundaries
+        if self.pos_x <= self.start_x - self.patrol_range:
+            self.direction = 1
+        elif self.pos_x >= self.start_x + self.patrol_range:
+            self.direction = -1
+
+        # Platform collision (reverses direction on wall)
+        hits = [p for p in self.game.platforms if self.rect.colliderect(p.rect)]
+        if hits:
+            self.direction = -self.direction
+            self.pos_x += self.direction * 3
+
+        # Collision with active player
+        player = self.game.player
+        if player and player.alive() and player.state not in ['hit', 'dying']:
+            if self.rect.colliderect(player.hitbox):
+                if player.vel.y > 0 and player.hitbox.bottom <= self.rect.top + 10:
+                    self.stomp()
+                    player.vel.y = PLAYER_JUMP_STRENGTH * 0.75
+                    player.on_ground = False
+                    if self.game.sound_hit:
+                        self.game.sound_hit.play()
+                elif player.state == 'dodging':
+                    pass
+                elif not player.invincible:
+                    player.take_hit()

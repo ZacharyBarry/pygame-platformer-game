@@ -11,7 +11,7 @@ from constants import * # Import all constants
 import levels            # <-- 2. Import the module itself
 from assets import load_image, load_sound, load_music, load_font
 from utils import draw_text
-from sprites import Player, Platform, Hazard, Goal # Import sprite classes
+from sprites import Player, Platform, Hazard, Goal, CrawlerEnemy, FlyerEnemy # Import sprite classes
 
 class Game:
     """
@@ -71,6 +71,7 @@ class Game:
         self.platforms = pygame.sprite.Group()
         self.hazards = pygame.sprite.Group();
         self.goals = pygame.sprite.Group()
+        self.enemies = pygame.sprite.Group()
         self.player_sprite = pygame.sprite.GroupSingle()
 
         self._load_assets()
@@ -148,7 +149,7 @@ class Game:
 
         level_map = self.active_level_grid
         self.current_level_index = level_index
-        self.all_sprites.empty(); self.platforms.empty(); self.hazards.empty(); self.goals.empty(); self.player_sprite.empty()
+        self.all_sprites.empty(); self.platforms.empty(); self.hazards.empty(); self.goals.empty(); self.enemies.empty(); self.player_sprite.empty()
         level_h_tiles = len(level_map); level_w_tiles = len(level_map[0]) if level_h_tiles > 0 else 0
         level_pixel_h = level_h_tiles * TILE_SIZE; level_pixel_w = level_w_tiles * TILE_SIZE
         offset_x = max(0, (SCREEN_WIDTH - level_pixel_w) // 2); offset_y = max(0, (SCREEN_HEIGHT - level_pixel_h) // 2)
@@ -170,6 +171,12 @@ class Game:
                     if self.img_goal: goal = Goal(x, y, self.img_goal)
                     else: goal = Goal(x, y, None)
                     self.all_sprites.add(goal); self.goals.add(goal)
+                elif tile_char in ('C', 'E'): # Crawler Ground Enemy ("Goomba")
+                    enemy = CrawlerEnemy(self, x, y)
+                    self.all_sprites.add(enemy); self.enemies.add(enemy)
+                elif tile_char == 'B': # Flyer Airborne Enemy ("Bat")
+                    flyer = FlyerEnemy(self, x, y)
+                    self.all_sprites.add(flyer); self.enemies.add(flyer)
                 elif tile_char == 'P': # Player Start
                     if not player_found: self.player_start_pos = (x, y); player_found = True
                     else: print(f"Warning: Multiple 'P'...")
@@ -226,8 +233,10 @@ class Game:
                     if 0 <= r < len(self.active_level_grid) and 0 <= c < len(self.active_level_grid[0]):
                         if event.button == 1: # Left
                             block_rect = pygame.Rect(self.level_offset_x + c * TILE_SIZE, self.level_offset_y + r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-                            # Do not allow placing a platform block on top of the player's active body
+                            # Do not allow placing a platform block on top of the player's active body or enemies
                             if self.player and block_rect.colliderect(self.player.rect.inflate(-2, -2)):
+                                pass
+                            elif any(block_rect.colliderect(e.rect) for e in self.enemies):
                                 pass
                             elif self.active_level_grid[r][c] == '.':
                                 self.active_level_grid[r][c] = self.selected_block_type

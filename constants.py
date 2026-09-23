@@ -67,6 +67,18 @@ IMG_PLAYER_JUMP = "player_walk_04.png"
 IMG_HEART = "heart.png" # <-- NEW: Add a filename for your heart graphic (e.g., 16x16)
 IMG_HEART_EMPTY = "heart_empty.png" # <-- NEW: Optional empty heart graphic
 
+# Enemy Assets (Free CC0 Retro Pixel Art - easily replaceable in assets/images/)
+IMG_ENEMY_CRAWLER = ["enemy_crawler_0.png", "enemy_crawler_1.png"]
+IMG_ENEMY_CRAWLER_SQUASH = "enemy_crawler_squash.png"
+IMG_ENEMY_FLYER = ["enemy_flyer_0.png", "enemy_flyer_1.png"]
+
+# Enemy Tuning
+ENEMY_ANIMATION_SPEED = 150
+CRAWLER_SPEED = 1.0
+FLYER_SPEED = 1.2
+FLYER_WAVE_AMPLITUDE = 6
+FLYER_WAVE_FREQ = 0.05
+
 # Platform Types (Maps level character to image filename)
 PLATFORM_TYPES = {
     'X': "single_green_block_0.png",
