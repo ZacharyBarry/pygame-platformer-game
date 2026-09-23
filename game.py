@@ -213,6 +213,12 @@ class Game:
                     elif event.key == pygame.K_2: self.selected_block_type = 'S'
                     elif event.key == pygame.K_3: self.selected_block_type = 'F'
                     elif event.key == pygame.K_4: self.selected_block_type = 'I'
+                    elif event.key == pygame.K_l:
+                        chosen = self.show_level_select_screen()
+                        if chosen is not None:
+                            self.editing = False
+                            self.current_level_index = chosen
+                            self._load_level(chosen, hard_reset=True)
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     mouse_x, mouse_y = pygame.mouse.get_pos()
                     c = int((mouse_x - self.level_offset_x) // TILE_SIZE)
@@ -250,6 +256,12 @@ class Game:
                             except Exception as e: print(f"!!! ERROR Reloading: {e} !!!"); continue # Skip load if reload failed
                             self._load_level(self.current_level_index)
                         else: print("Cannot reload: Not playing.")
+                    elif event.key == pygame.K_l: # Level Select
+                        if self.playing:
+                            chosen = self.show_level_select_screen()
+                            if chosen is not None:
+                                self.current_level_index = chosen
+                                self._load_level(chosen, hard_reset=True)
                     # Player Controls
                     elif self.player and self.player_sprite.sprite:
                         if self.player.state not in ['hit', 'dying', 'dodging'] and not self.player.invincible:
@@ -310,6 +322,29 @@ class Game:
         else:
             self.screen.fill(COLOR_BG)
         self.all_sprites.draw(self.screen)
+
+        # --- Draw Player Overhead Healthbar ---
+        if self.player and self.player_sprite.sprite and self.player.alive() and self.player.state != 'dying' and self.player.visible:
+            bar_w = 16
+            bar_h = 3
+            bar_x = self.player.rect.centerx - bar_w // 2
+            bar_y = self.player.rect.top - 6
+            # Background / Border
+            pygame.draw.rect(self.screen, (20, 20, 25), (bar_x - 1, bar_y - 1, bar_w + 2, bar_h + 2))
+            pygame.draw.rect(self.screen, (60, 60, 70), (bar_x, bar_y, bar_w, bar_h))
+            
+            # Health width & color: starts green, turns red when hit
+            pct = max(0.0, min(1.0, self.player.health / self.player.max_health))
+            fill_w = int(bar_w * pct)
+            if self.player.health == self.player.max_health:
+                health_color = (60, 230, 60) # Vibrant Green
+            elif self.player.health == 2:
+                health_color = (240, 110, 30) # Orange/Red when hit
+            else:
+                health_color = (230, 40, 40) # Bright Red
+            
+            if fill_w > 0:
+                pygame.draw.rect(self.screen, health_color, (bar_x, bar_y, fill_w, bar_h))
 
         # --- Draw Editor ---
         if self.editing:
@@ -453,42 +488,168 @@ class Game:
             if self.sound_win_game: self.sound_win_game.play()
             pygame.mixer.music.fadeout(500); self.game_won = True
 
+    def show_level_select_screen(self):
+        """Displays a retro Level Select menu with a visual grid of level cards."""
+        if not self.running: return None
+
+        LEVEL_NAMES = [
+            "Awakening", "Bloom", "Hazards", "Climb", "Ice Intro",
+            "Labyrinth", "Dodge Test", "Slide Run", "Gauntlet", "Ice Finale",
+            "Islands", "Hazard Maze", "Ice Cavern", "Pillars", "Dunes",
+            "Split Paths", "Ice & Fire", "Fortress", "Precision", "Citadel"
+        ]
+        total = len(levels.LEVELS)
+        selected = self.current_level_index if (0 <= self.current_level_index < total) else 0
+
+        cols = 5
+        rows = (total + cols - 1) // cols
+        card_w, card_h = 150, 70
+        gap_x, gap_y = 16, 16
+        grid_w = cols * card_w + (cols - 1) * gap_x
+        grid_h = rows * card_h + (rows - 1) * gap_y
+        start_x = (SCREEN_WIDTH - grid_w) // 2
+        start_y = (SCREEN_HEIGHT - grid_h) // 2 + 25
+
+        menu_active = True
+
+        while menu_active and self.running:
+            self.clock.tick(FPS)
+            mouse_pos = pygame.mouse.get_pos()
+            mouse_clicked = False
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    return None
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        return None
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        return selected
+                    elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                        selected = (selected + 1) % total
+                    elif event.key in (pygame.K_LEFT, pygame.K_a):
+                        selected = (selected - 1) % total
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        if selected + cols < total:
+                            selected += cols
+                    elif event.key in (pygame.K_UP, pygame.K_w):
+                        if selected - cols >= 0:
+                            selected -= cols
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 1:
+                        mouse_clicked = True
+
+            # Background
+            if self.img_background:
+                self.screen.blit(self.img_background, (0, 0))
+                dark_overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+                dark_overlay.fill((10, 10, 20, 220))
+                self.screen.blit(dark_overlay, (0, 0))
+            else:
+                self.screen.fill(COLOR_BG)
+
+            # Header
+            draw_text(self.screen, "LEVEL SELECT", 26, SCREEN_WIDTH / 2, 45, self.title_font, COLOR_TITLE)
+            draw_text(self.screen, "DEVELOPER / TESTING PORTAL", 10, SCREEN_WIDTH / 2, 80, self.default_font, COLOR_INFO)
+
+            # Draw Level Cards
+            for idx in range(total):
+                r = idx // cols
+                c = idx % cols
+                card_x = start_x + c * (card_w + gap_x)
+                card_y = start_y + r * (card_h + gap_y)
+                card_rect = pygame.Rect(card_x, card_y, card_w, card_h)
+
+                # Check mouse hover
+                if card_rect.collidepoint(mouse_pos):
+                    selected = idx
+                    if mouse_clicked:
+                        return idx
+
+                is_selected = (idx == selected)
+
+                # Retro Card Styling
+                bg_color = (65, 50, 85) if is_selected else (30, 25, 40)
+                border_color = COLOR_TITLE if is_selected else (70, 70, 95)
+                border_width = 3 if is_selected else 1
+
+                pygame.draw.rect(self.screen, bg_color, card_rect, border_radius=6)
+                pygame.draw.rect(self.screen, border_color, card_rect, border_width, border_radius=6)
+
+                # Level Number
+                lvl_str = f"LVL {idx + 1:02d}"
+                lvl_color = COLOR_WIN if is_selected else COLOR_TEXT
+                draw_text(self.screen, lvl_str, 12, card_rect.centerx, card_rect.top + 16, self.default_font, lvl_color)
+
+                # Level Name
+                name_str = LEVEL_NAMES[idx] if idx < len(LEVEL_NAMES) else f"Level {idx + 1}"
+                name_color = COLOR_TITLE if is_selected else COLOR_INFO
+                draw_text(self.screen, name_str, 8, card_rect.centerx, card_rect.top + 42, self.small_font, name_color)
+
+            # Footer
+            draw_text(self.screen, "Click Level or Navigate with Arrows / WASD + Enter  |  ESC: Back", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 35, self.small_font, COLOR_TEXT)
+
+            pygame.display.flip()
+
+        return None
+
     def show_start_screen(self):
         if not self.title_font or not self.default_font or not self.small_font: print("Cannot show start screen - fonts missing."); self.running = False; return
-        
-        # Add a dark semi-transparent overlay to make text pop against background
-        if self.img_background:
-            self.screen.blit(self.img_background, (0, 0))
-            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 180)) # Darken background
-            self.screen.blit(overlay, (0, 0))
-        else:
-            self.screen.fill(COLOR_BG)
-            
-        # Title
-        draw_text(self.screen, TITLE, 32, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 4, self.title_font, COLOR_TITLE)
-        
-        # Subtitle
-        draw_text(self.screen, "A Retro Puzzle Platformer", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 4 + 40, self.default_font, COLOR_INFO)
 
-        # Controls Section
-        start_y = SCREEN_HEIGHT / 2 - 20
-        draw_text(self.screen, "--- CONTROLS ---", 16, SCREEN_WIDTH / 2, start_y, self.default_font, COLOR_TEXT)
-        draw_text(self.screen, "Move: Arrows / A & D", 12, SCREEN_WIDTH / 2, start_y + 35, self.default_font, COLOR_WIN)
-        draw_text(self.screen, "Jump: Space / W / Up", 12, SCREEN_WIDTH / 2, start_y + 55, self.default_font, COLOR_WIN)
-        draw_text(self.screen, "Dodge Roll: Left Shift", 12, SCREEN_WIDTH / 2, start_y + 75, self.default_font, COLOR_INFO)
-        
-        # Edit Mode Section
-        draw_text(self.screen, "--- LEVEL EDITOR ---", 16, SCREEN_WIDTH / 2, start_y + 115, self.default_font, COLOR_TEXT)
-        draw_text(self.screen, "Press 'E' to pause and edit difficult levels!", 12, SCREEN_WIDTH / 2, start_y + 150, self.default_font, COLOR_WIN)
-        draw_text(self.screen, "Beat the level in under 3 edits for a PERFECT score.", 10, SCREEN_WIDTH / 2, start_y + 175, self.default_font, COLOR_TEXT)
-        
-        # Bottom prompts
-        draw_text(self.screen, "Press any key to embark...", 16, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 3 / 4 + 40, self.default_font, COLOR_TITLE)
-        draw_text(self.screen, f"Current Mode: {self.game_mode.upper()} | (ESC to Quit)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 30, self.small_font, COLOR_TEXT)
-        
-        pygame.display.flip()
-        self._wait_for_key(allow_quit=True)
+        waiting = True
+        while waiting and self.running:
+            self.clock.tick(FPS)
+
+            # Add a dark semi-transparent overlay to make text pop against background
+            if self.img_background:
+                self.screen.blit(self.img_background, (0, 0))
+                overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+                overlay.fill((0, 0, 0, 180)) # Darken background
+                self.screen.blit(overlay, (0, 0))
+            else:
+                self.screen.fill(COLOR_BG)
+
+            # Title
+            draw_text(self.screen, TITLE, 32, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 4, self.title_font, COLOR_TITLE)
+
+            # Subtitle
+            draw_text(self.screen, "A Retro Puzzle Platformer", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 4 + 40, self.default_font, COLOR_INFO)
+
+            # Controls Section
+            start_y = SCREEN_HEIGHT / 2 - 20
+            draw_text(self.screen, "--- CONTROLS ---", 16, SCREEN_WIDTH / 2, start_y, self.default_font, COLOR_TEXT)
+            draw_text(self.screen, "Move: Arrows / A & D", 12, SCREEN_WIDTH / 2, start_y + 35, self.default_font, COLOR_WIN)
+            draw_text(self.screen, "Jump: Space / W / Up", 12, SCREEN_WIDTH / 2, start_y + 55, self.default_font, COLOR_WIN)
+            draw_text(self.screen, "Dodge Roll: Left Shift", 12, SCREEN_WIDTH / 2, start_y + 75, self.default_font, COLOR_INFO)
+
+            # Edit Mode Section
+            draw_text(self.screen, "--- LEVEL EDITOR & DEV ---", 16, SCREEN_WIDTH / 2, start_y + 115, self.default_font, COLOR_TEXT)
+            draw_text(self.screen, "Press 'E' in-game to pause and edit levels!", 12, SCREEN_WIDTH / 2, start_y + 145, self.default_font, COLOR_WIN)
+            draw_text(self.screen, "Press 'L' anytime for Level Select (Dev Menu)", 12, SCREEN_WIDTH / 2, start_y + 170, self.default_font, COLOR_TITLE)
+
+            # Bottom prompts
+            draw_text(self.screen, "Press SPACE / ENTER to Start  |  Press 'L' for Level Select", 12, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 3 / 4 + 40, self.default_font, COLOR_TEXT)
+            draw_text(self.screen, f"Current Mode: {self.game_mode.upper()} | (ESC to Quit)", 8, SCREEN_WIDTH / 2, SCREEN_HEIGHT - 30, self.small_font, COLOR_INFO)
+
+            pygame.display.flip()
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    waiting = False
+                    self.running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        waiting = False
+                        self.running = False
+                    elif event.key == pygame.K_l:
+                        chosen = self.show_level_select_screen()
+                        if chosen is not None:
+                            self.current_level_index = chosen
+                            waiting = False
+                    elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
+                        self.current_level_index = 0
+                        waiting = False
 
     def show_game_over_screen(self): # This screen now primarily shows for Hardcore mode 'Game Over'
         if not self.running or not self.title_font or not self.default_font or not self.small_font: return
@@ -530,13 +691,17 @@ class Game:
         # ========================
         # Main Application Loop
         # ========================
+        first_game = True
         while self.running:
             # --- Reset for a new game attempt ---
             self.game_over = False            # Reset hardcore game over
             self.restart_level_pending = False # Reset normal restart flag
             self.game_won = False
             self.next_level_pending = False
-            self.current_level_index = 0      # Always start at level 0 on new game/retry hardcore
+            if first_game:
+                first_game = False
+            else:
+                self.current_level_index = 0      # Reset to level 0 after win / hardcore game over
             print("-" * 30)
             print(f"Starting Game (Mode: {self.game_mode.upper()}, Level {self.current_level_index + 1})")
             print("-" * 30)
